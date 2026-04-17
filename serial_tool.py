@@ -32,6 +32,48 @@ def app_dir() -> str:
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
+
+def config_path() -> str:
+    """返回配置文件路径。
+
+    优先使用程序同目录下的 serial_tool.ini（便携模式）。
+    若该目录不可写（如安装到 /opt/qt5com 之类的系统目录），
+    则回退到用户配置目录：
+        Linux/macOS:  ~/.config/qt5com/serial_tool.ini
+        Windows:      %APPDATA%/qt5com/serial_tool.ini
+    """
+    portable = os.path.join(app_dir(), "serial_tool.ini")
+    # 同目录已有配置文件且可写 -> 沿用（便携模式）
+    try:
+        if os.path.isfile(portable) and os.access(portable, os.W_OK):
+            return portable
+        if not os.path.exists(portable) and os.access(app_dir(), os.W_OK):
+            return portable
+    except Exception:
+        pass
+
+    # 回退到用户目录
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+            os.path.expanduser("~"), ".config")
+    user_dir = os.path.join(base, "qt5com")
+    try:
+        os.makedirs(user_dir, exist_ok=True)
+    except Exception:
+        user_dir = os.path.expanduser("~")
+    user_ini = os.path.join(user_dir, "serial_tool.ini")
+
+    # 首次回退时，若程序同目录存在只读的默认配置，则拷贝一份作为初始值
+    try:
+        if not os.path.isfile(user_ini) and os.path.isfile(portable):
+            import shutil
+            shutil.copyfile(portable, user_ini)
+    except Exception:
+        pass
+    return user_ini
+
 # ---- 修正中文路径下 Qt 插件路径 ----
 try:
     import PyQt5
@@ -214,8 +256,8 @@ class SerialTool(QMainWindow):
         self.tx_bytes = 0
         self.rx_bytes = 0
 
-        # 配置文件放在程序同目录
-        self._config_path = os.path.join(app_dir(), "serial_tool.ini")
+        # 配置文件：优先程序同目录（便携），不可写时自动回退到用户目录
+        self._config_path = config_path()
         self.settings = QSettings(self._config_path, QSettings.IniFormat)
 
         self._build_ui()

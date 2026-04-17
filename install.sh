@@ -33,6 +33,22 @@ uninstall() {
     echo ">>> 卸载 $APP_NAME ..."
     rm -rf "$INSTALL_DIR"
     rm -f  "$BIN_LINK" "$DESKTOP_FILE" "$ICON_DEST"
+
+    # 清理各用户的配置文件 (~/.config/qt5com)
+    echo ">>> 清理用户配置文件 ..."
+    # /root
+    rm -rf "/root/.config/qt5com" 2>/dev/null || true
+    # /home/*
+    for _home in /home/*; do
+        [[ -d "$_home" ]] || continue
+        rm -rf "$_home/.config/qt5com" 2>/dev/null || true
+    done
+    # 调用者 (sudo 前的用户), 兜底一次
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        _uhome=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        [[ -n "$_uhome" ]] && rm -rf "$_uhome/.config/qt5com" 2>/dev/null || true
+    fi
+
     command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q || true
     echo "✔ 卸载完成。"
 }
@@ -72,6 +88,8 @@ install_app() {
         install -m 0644 "$ICON_SRC" "$INSTALL_DIR/app.png"
         install -m 0644 "$ICON_SRC" "$ICON_DEST"
     fi
+    # 放开安装目录权限, 便于普通用户在此目录保存配置/日志 (便携模式)
+    chmod 0755 "$INSTALL_DIR"
 
     # 4. /usr/local/bin 软链接
     ln -sf "$INSTALL_DIR/qt5com" "$BIN_LINK"
