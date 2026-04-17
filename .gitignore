@@ -1,0 +1,5 @@
+/build
+/dist
+*.old
+*.spec
+*.log
