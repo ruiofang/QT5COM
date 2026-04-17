@@ -20,7 +20,7 @@
 5. **自动回复**：表格式规则，每条独立启用开关；匹配与发送均可独立选择 HEX 或文本。
 6. **快捷按钮**：自定义名称的一键指令按钮，持久保存，每条可独立设置 HEX / 附加换行。
 7. **界面皮肤**：浅色 / 深色 皮肤切换，Fusion 风格 + 自定义 QSS。
-8. **配置文件**：`serial_tool.ini` 与程序同目录，便携化；自动保存端口参数、显示选项、历史发送、自动回复规则、快捷按钮、窗口布局等；**历史发送** 可从下拉框快速调出。
+8. **配置文件**：默认为程序同目录的 `serial_tool.ini`（便携化）；若程序所在目录不可写，会自动回退到用户目录（Linux/macOS: `~/.config/qt5com/`，Windows: `%APPDATA%\qt5com\`）。自动保存端口参数、显示选项、历史发送、自动回复规则、快捷按钮、窗口布局等；**历史发送** 可从下拉框快速调出。
 
 ---
 
@@ -55,7 +55,13 @@ sudo ./install.sh --uninstall     # 卸载
 - 终端命令：`qt5com`
 - 应用菜单：`Serial Debug Tool`
 - 桌面图标：`/usr/share/pixmaps/qt5com.png`
-- 配置文件随程序位于 `/opt/qt5com/serial_tool.ini`
+- 配置文件：
+  - 便携模式（程序所在目录可写时）：`<程序目录>/serial_tool.ini`
+  - 系统安装（`/opt/qt5com`）默认安装目录已开放可写权限，因此仍为 `/opt/qt5com/serial_tool.ini`
+  - 若安装目录不可写，则自动回退到用户目录：
+    - Linux/macOS：`~/.config/qt5com/serial_tool.ini`
+    - Windows：`%APPDATA%\qt5com\serial_tool.ini`
+- `sudo ./install.sh --uninstall` 会同时清理 `/opt/qt5com` 以及各用户下的 `~/.config/qt5com/`
 
 ---
 
