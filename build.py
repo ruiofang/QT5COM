@@ -10,6 +10,7 @@
     pip install pyinstaller pyqt5 pyserial
 """
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -97,8 +98,20 @@ def ensure_pyinstaller():
                                "pyinstaller", "pyqt5", "pyserial"])
 
 
+def ensure_icon():
+    """若 app.png/app.ico 缺失，则调用 gen_icon.py 生成。"""
+    need = not ((HERE / "app.png").exists() and (HERE / "app.ico").exists())
+    gen = HERE / "gen_icon.py"
+    if need and gen.exists():
+        print(">>> 生成图标 ...")
+        env = os.environ.copy()
+        env.setdefault("QT_QPA_PLATFORM", "offscreen")
+        subprocess.check_call([sys.executable, str(gen)], cwd=str(HERE), env=env)
+
+
 def build():
     ensure_pyinstaller()
+    ensure_icon()
     version, author = read_meta()
     is_win = sys.platform.startswith("win")
 

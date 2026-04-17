@@ -42,8 +42,28 @@ sudo usermod -aG dialout $USER     # 重新登录生效
 python3 build.py            # 产物: dist/SerialDebugTool-V1.0[.exe|-linux]
 python3 build.py --clean    # 清理构建产物
 ```
+- 打包前会自动调用 `gen_icon.py` 生成 `app.png` / `app.ico`（已存在则跳过）。
 - Windows 自动为 EXE 嵌入版本资源（文件属性页可见版本号与作者）。
 - Linux / Windows 均输出 `--onefile` 单文件，双击即可运行。
+
+### 安装到系统（Linux）
+```bash
+sudo ./install.sh                 # 安装到 /opt/qt5com，创建桌面快捷方式
+sudo ./install.sh --uninstall     # 卸载
+```
+安装后：
+- 终端命令：`qt5com`
+- 应用菜单：`Serial Debug Tool`
+- 桌面图标：`/usr/share/pixmaps/qt5com.png`
+- 配置文件随程序位于 `/opt/qt5com/serial_tool.ini`
+
+---
+
+## 🎨 自定义图标
+```bash
+python3 gen_icon.py           # 重新生成 app.png / app.ico
+```
+如需安装 Pillow 才可生成 `.ico`：`pip install pillow`
 
 ---
 
