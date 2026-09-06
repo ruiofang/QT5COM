@@ -27,7 +27,7 @@ def read_meta():
     text = ENTRY.read_text(encoding="utf-8")
     m_ver = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
     m_auth = re.search(r'__author__\s*=\s*["\']([^"\']+)["\']', text)
-    return (m_ver.group(1) if m_ver else "V1.0",
+    return (m_ver.group(1) if m_ver else "V1.0.1",
             m_auth.group(1) if m_auth else "RUIO")
 
 
@@ -115,7 +115,7 @@ def build():
     version, author = read_meta()
     is_win = sys.platform.startswith("win")
 
-    # 产物名包含版本号，如 SerialDebugTool-V1.0.exe / SerialDebugTool-V1.0-linux
+    # 产物名包含版本号，如 SerialDebugTool-V1.0.1.exe / SerialDebugTool-V1.0.1-linux
     plat_suffix = "" if is_win else f"-{sys.platform}"
     name = f"{APP_NAME}-{version}{plat_suffix}"
 

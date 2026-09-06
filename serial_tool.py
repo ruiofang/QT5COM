@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Serial Debug Tool (PyQt5)
-Version: V1.0
+Version: V1.0.1
 Author : RUIO
 License: MIT
 Features:
@@ -15,7 +15,7 @@ Features:
   7. 配置文件 (程序同目录 ini) 保存上次设置与历史发送
 """
 
-__version__ = "V1.0"
+__version__ = "V1.0.1"
 __author__ = "RUIO"
 
 import os
