@@ -7,7 +7,7 @@
 - **协议**：MIT License
 
 ---
-
+![alt text](image.png)
 ## ✨ 功能特性
 
 1. **串口管理**：启动自动扫描一次，`⟳` 按钮手动刷新；完整的 数据位 / 校验位 (None/Even/Odd/Mark/Space) / 停止位 配置。
