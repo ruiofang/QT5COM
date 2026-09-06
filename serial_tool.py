@@ -608,6 +608,14 @@ class SerialTool(QMainWindow):
         self.cmb_history.setEditable(False)
         self.cmb_history.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.cmb_history.activated.connect(self.on_history_selected)
+        self.btn_history_delete = QToolButton()
+        self.btn_history_delete.setText("删除所选")
+        self.btn_history_delete.setToolTip("删除当前选中的发送历史，保留发送区内容")
+        self.btn_history_delete.clicked.connect(self.on_history_delete)
+        self.btn_history_clear = QToolButton()
+        self.btn_history_clear.setText("清空历史")
+        self.btn_history_clear.setToolTip("清空全部发送历史并立即保存，保留发送区内容")
+        self.btn_history_clear.clicked.connect(self.on_history_clear)
 
         self.chk_auto_send = QCheckBox("循环发送")
         self.spn_interval = QSpinBox()
@@ -623,6 +631,8 @@ class SerialTool(QMainWindow):
 
         hist_row.addWidget(QLabel("历史:"))
         hist_row.addWidget(self.cmb_history, 1)
+        hist_row.addWidget(self.btn_history_delete)
+        hist_row.addWidget(self.btn_history_clear)
         hist_row.addSpacing(8)
         hist_row.addWidget(self.chk_auto_send)
         hist_row.addWidget(self.spn_interval)
@@ -1399,6 +1409,24 @@ class SerialTool(QMainWindow):
         if idx < 0:
             return
         self.send_edit.setPlainText(self.cmb_history.itemText(idx))
+
+    def _persist_history(self):
+        items = [self.cmb_history.itemText(i) for i in range(self.cmb_history.count())]
+        self.settings.setValue("history", json.dumps(items, ensure_ascii=False))
+        self.settings.sync()
+
+    def on_history_delete(self):
+        idx = self.cmb_history.currentIndex()
+        if idx < 0:
+            return
+        self.cmb_history.removeItem(idx)
+        self._persist_history()
+        self.status.showMessage("已删除所选发送历史", 3000)
+
+    def on_history_clear(self):
+        self.cmb_history.clear()
+        self._persist_history()
+        self.status.showMessage("已清空发送历史", 3000)
 
     # -------------------------------------------------------------- #
     #  自动回复
