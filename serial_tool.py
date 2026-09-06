@@ -23,6 +23,7 @@ import sys
 import json
 import time
 import datetime
+import struct
 from pathlib import Path
 
 
@@ -95,6 +96,7 @@ from PyQt5.QtWidgets import (
     QGridLayout, QGroupBox, QSplitter, QFileDialog, QMessageBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QStatusBar, QSpinBox, QTabWidget, QAction,
     QStyleFactory, QToolButton, QSizePolicy, QAbstractItemView,
+    QFormLayout,
 )
 
 import serial
@@ -161,6 +163,30 @@ def calc_crc16_ccitt(data: bytes) -> bytes:
 
 CHECKSUM_TYPES = ["无", "SUM (1B)", "XOR (1B)", "CRC16-Modbus", "CRC16-CCITT"]
 
+MODBUS_FUNCTIONS = [
+    ("01 读线圈", 0x01),
+    ("02 读离散输入", 0x02),
+    ("03 读保持寄存器", 0x03),
+    ("04 读输入寄存器", 0x04),
+    ("05 写单个线圈", 0x05),
+    ("06 写单个寄存器", 0x06),
+    ("15 写多个线圈", 0x0F),
+    ("16 写多个寄存器", 0x10),
+]
+
+MODBUS_FUNCTION_TEXT = {code: text for text, code in MODBUS_FUNCTIONS}
+MODBUS_EXCEPTION_TEXT = {
+    0x01: "非法功能码",
+    0x02: "非法数据地址",
+    0x03: "非法数据值",
+    0x04: "从站设备故障",
+    0x05: "确认",
+    0x06: "从站忙",
+    0x08: "存储奇偶校验错误",
+    0x0A: "网关路径不可用",
+    0x0B: "网关目标设备无响应",
+}
+
 
 def apply_checksum(data: bytes, ctype: str, start: int, end: int) -> bytes:
     """追加校验字节。start/end 为 1-based 闭区间，end<=0 表示到末尾。"""
@@ -183,6 +209,219 @@ def apply_checksum(data: bytes, ctype: str, start: int, end: int) -> bytes:
     else:
         chk = b""
     return data + chk
+
+
+def parse_number_list(text: str) -> list[int]:
+    values = []
+    for item in text.replace("\n", ",").replace(";", ",").split(","):
+        token = item.strip()
+        if not token:
+            continue
+        values.append(int(token, 0))
+    return values
+
+
+def coils_to_bytes(values: list[int]) -> bytes:
+    packed = bytearray((len(values) + 7) // 8)
+    for idx, value in enumerate(values):
+        if value:
+            packed[idx // 8] |= 1 << (idx % 8)
+    return bytes(packed)
+
+
+def bytes_to_coils(data: bytes, quantity: int) -> list[int]:
+    values = []
+    for idx in range(quantity):
+        values.append(1 if data[idx // 8] & (1 << (idx % 8)) else 0)
+    return values
+
+
+def build_modbus_rtu_request(slave_id: int, function_code: int, address: int,
+                             quantity: int, values: list[int] | None = None) -> bytes:
+    if not (0 <= slave_id <= 255):
+        raise ValueError("从站地址必须在 0~255 之间。")
+    if not (0 <= address <= 0xFFFF):
+        raise ValueError("寄存器/线圈地址必须在 0~65535 之间。")
+
+    if function_code in (0x01, 0x02):
+        if not (1 <= quantity <= 2000):
+            raise ValueError("读线圈/离散输入数量必须在 1~2000 之间。")
+        pdu = struct.pack(">BHH", function_code, address, quantity)
+    elif function_code in (0x03, 0x04):
+        if not (1 <= quantity <= 125):
+            raise ValueError("读寄存器数量必须在 1~125 之间。")
+        pdu = struct.pack(">BHH", function_code, address, quantity)
+    elif function_code == 0x05:
+        if not values or len(values) != 1 or values[0] not in (0, 1):
+            raise ValueError("写单个线圈需要提供 0 或 1。")
+        coil = 0xFF00 if values[0] else 0x0000
+        pdu = struct.pack(">BHH", function_code, address, coil)
+    elif function_code == 0x06:
+        if not values or len(values) != 1:
+            raise ValueError("写单个寄存器需要提供 0~65535 数值。")
+        if not (0 <= values[0] <= 0xFFFF):
+            raise ValueError("寄存器值必须在 0~65535 之间。")
+        pdu = struct.pack(">BHH", function_code, address, values[0])
+    elif function_code == 0x0F:
+        if not values:
+            raise ValueError("写多个线圈需要提供 0/1 列表。")
+        if not all(v in (0, 1) for v in values):
+            raise ValueError("线圈值只能是 0 或 1。")
+        quantity = len(values)
+        if not (1 <= quantity <= 1968):
+            raise ValueError("写多个线圈数量必须在 1~1968 之间。")
+        payload = coils_to_bytes(values)
+        pdu = struct.pack(">BHHB", function_code, address, quantity, len(payload)) + payload
+    elif function_code == 0x10:
+        if not values:
+            raise ValueError("写多个寄存器需要提供数值列表。")
+        if not all(0 <= v <= 0xFFFF for v in values):
+            raise ValueError("寄存器值必须在 0~65535 之间。")
+        quantity = len(values)
+        if not (1 <= quantity <= 123):
+            raise ValueError("写多个寄存器数量必须在 1~123 之间。")
+        payload = b"".join(struct.pack(">H", value) for value in values)
+        pdu = struct.pack(">BHHB", function_code, address, quantity, len(payload)) + payload
+    else:
+        raise ValueError("当前仅支持 01/02/03/04/05/06/15/16 功能码。")
+
+    span = 1 if function_code in (5, 6) else quantity
+    if address + span > 65536:
+        raise ValueError("请求地址范围超出 65535。")
+    frame = bytes([slave_id]) + pdu
+    return frame + calc_crc16_modbus(frame)
+
+
+def parse_modbus_rtu_response(request: dict, response: bytes) -> dict:
+    if len(response) < 5:
+        raise ValueError("响应长度不足。")
+    body = response[:-2]
+    if calc_crc16_modbus(body) != response[-2:]:
+        raise ValueError("CRC 校验失败。")
+
+    slave_id = response[0]
+    function_code = response[1]
+    if slave_id != request["slave_id"]:
+        raise ValueError(f"从站地址不匹配：期望 {request['slave_id']}，收到 {slave_id}。")
+
+    if function_code & 0x80:
+        if function_code != request["function_code"] | 0x80 or len(response) != 5:
+            raise ValueError("异常响应功能码或长度不匹配。")
+        exc_code = response[2] if len(response) >= 5 else None
+        exc_text = MODBUS_EXCEPTION_TEXT.get(exc_code, "未知异常")
+        raise ValueError(f"从站异常 0x{exc_code:02X}: {exc_text}")
+    if function_code != request["function_code"]:
+        raise ValueError(f"功能码不匹配：期望 0x{request['function_code']:02X}，收到 0x{function_code:02X}。")
+
+    result = {
+        "slave_id": slave_id,
+        "function_code": function_code,
+        "function_text": MODBUS_FUNCTION_TEXT.get(function_code, f"0x{function_code:02X}"),
+    }
+
+    if function_code in (0x01, 0x02):
+        byte_count = response[2]
+        payload = response[3:-2]
+        if byte_count != len(payload) or byte_count != (request["quantity"] + 7) // 8:
+            raise ValueError("字节计数与响应长度不一致。")
+        result["values"] = bytes_to_coils(payload, request["quantity"])
+    elif function_code in (0x03, 0x04):
+        byte_count = response[2]
+        payload = response[3:-2]
+        if byte_count != len(payload) or byte_count != request["quantity"] * 2:
+            raise ValueError("寄存器响应字节数无效。")
+        result["values"] = [
+            struct.unpack(">H", payload[idx:idx + 2])[0]
+            for idx in range(0, len(payload), 2)
+        ]
+    elif function_code in (0x05, 0x06):
+        if len(response) != 8:
+            raise ValueError("写响应长度无效。")
+        address, value = struct.unpack(">HH", response[2:6])
+        expected = (0xFF00 if request["values"][0] else 0) if function_code == 5 else request["values"][0]
+        if address != request["address"] or value != expected:
+            raise ValueError("写响应地址或数值不匹配。")
+        result["address"] = address
+        result["value"] = value
+    elif function_code in (0x0F, 0x10):
+        if len(response) != 8:
+            raise ValueError("写响应长度无效。")
+        address, quantity = struct.unpack(">HH", response[2:6])
+        if address != request["address"] or quantity != len(request["values"]):
+            raise ValueError("写响应地址或数量不匹配。")
+        result["address"] = address
+        result["quantity"] = quantity
+
+    return result
+
+
+def _read_mbp_string(data: bytes, offset: int) -> tuple[str, int]:
+    """Read an MFC Unicode CString, preserving empty/duplicate register names."""
+    if data[offset:offset + 3] != b"\xff\xfe\xff":
+        raise ValueError("不支持的 MBP 字符串格式。")
+    offset += 3
+    size = data[offset]
+    offset += 1
+    if size == 0xFF:
+        size = struct.unpack_from("<H", data, offset)[0]
+        offset += 2
+        if size == 0xFFFF:
+            size = struct.unpack_from("<I", data, offset)[0]
+            offset += 4
+    end = offset + size * 2
+    if end > len(data):
+        raise ValueError("MBP 字符串被截断。")
+    return data[offset:end].decode("utf-16le").strip(), end
+
+
+def parse_binary_mbp_profile(data: bytes) -> dict | None:
+    """Import the Modbus Poll 0x2454 layout verified with mbp/夹爪.mbp.
+
+    Header: version, header tag, function, wire address, quantity.
+    Names follow 52-byte cell styles; a 0x55555555 separator precedes
+    the saved uint16 register array. Later sections contain 100 scale
+    records (50 bytes each), 128 bytes of flags, 2000 CStrings, then
+    the scan interval and slave ID. Reject other layouts, never guess.
+    """
+    try:
+        magic, tag, function, address, quantity = struct.unpack_from("<5I", data)
+        if (magic, tag) != (0x2454, 0xA8):
+            return None
+        limit = 2000 if function in (1, 2) else 125 if function in (3, 4) else 0
+        if not 1 <= quantity <= limit or address + quantity > 65536:
+            return None
+        offset = 520
+        names = []
+        for _ in range(quantity):
+            name, offset = _read_mbp_string(data, offset + 52)
+            names.append(name)
+        if data[offset:offset + 4] != b"UUUU":
+            return None
+        offset += 4
+        values = struct.unpack_from(f"<{quantity}H", data, offset)
+        offset += quantity * 2 + 100 * 50 + 128
+        for _ in range(2000):
+            _, offset = _read_mbp_string(data, offset)
+        # This version has a 240-byte settings trailer (including one CString).
+        if len(data) - offset != 240:
+            return None
+        scan_rate, slave_id = struct.unpack_from("<2I", data, offset)
+        if not 1 <= slave_id <= 247 or not 1 <= scan_rate <= 3600000:
+            return None
+    except (ValueError, IndexError, struct.error, UnicodeError):
+        return None
+    return {
+        "format": "binary-mbp", "magic": magic,
+        "slave_id": slave_id, "function_code": function,
+        "function_text": MODBUS_FUNCTION_TEXT[function],
+        "start_address": address, "quantity": quantity,
+        "scan_rate": scan_rate, "signed": True,
+        "entries": [
+            {"index": i, "address": address + i, "value": value, "comment": names[i]}
+            for i, value in enumerate(values)
+        ],
+        "has_explicit_values": True, "notes_only": False,
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -255,6 +494,15 @@ class SerialTool(QMainWindow):
         self.log_file = None
         self.tx_bytes = 0
         self.rx_bytes = 0
+        self.pending_modbus_request = None
+        self.modbus_rx_buffer = bytearray()
+        self.modbus_entries = []
+        self.modbus_table_context = None
+        self.modbus_timeout = QTimer(self)
+        self.modbus_timeout.setSingleShot(True)
+        self.modbus_timeout.timeout.connect(self._on_modbus_timeout)
+        self.modbus_poll_timer = QTimer(self)
+        self.modbus_poll_timer.timeout.connect(self._poll_modbus)
 
         # 配置文件：优先程序同目录（便携），不可写时自动回退到用户目录
         self._config_path = config_path()
@@ -477,10 +725,22 @@ class SerialTool(QMainWindow):
         tab.addTab(send_box, "发送")
         tab.addTab(auto_box, "自动回复")
         tab.addTab(self._build_quick_tab(), "快捷按钮")
+        tab.addTab(self._build_modbus_tab(), "Modbus")
         bv.addWidget(tab)
         right_split.addWidget(bottom)
         right_split.setStretchFactor(0, 3)
         right_split.setStretchFactor(1, 2)
+        normal_split_sizes = []
+
+        def resize_for_modbus(index):
+            if tab.tabText(index) == "Modbus":
+                normal_split_sizes[:] = right_split.sizes()
+                right_split.setSizes([100, max(500, right_split.height() - 100)])
+            elif normal_split_sizes:
+                right_split.setSizes(normal_split_sizes)
+                normal_split_sizes.clear()
+
+        tab.currentChanged.connect(resize_for_modbus)
 
         main_split = QSplitter(Qt.Horizontal)
         main_split.addWidget(left)
@@ -552,6 +812,17 @@ class SerialTool(QMainWindow):
             selection-background-color: #2a6fb2; selection-color: white;
         }
         QTextEdit { background: #fafafa; }
+        QFileDialog QAbstractItemView {
+            background: #ffffff; alternate-background-color: #f2f5f9;
+            color: #202020; border: 1px solid #c8c8c8;
+            selection-background-color: #2a6fb2; selection-color: #ffffff;
+        }
+        QFileDialog QAbstractItemView::item:hover {
+            background: #e8f1fb; color: #202020;
+        }
+        QFileDialog QAbstractItemView::item:selected {
+            background: #2a6fb2; color: #ffffff;
+        }
         /* ---- 下拉列表：不透明背景，避免覆盖文字 ---- */
         QComboBox QAbstractItemView {
             background: #ffffff;
@@ -618,6 +889,18 @@ class SerialTool(QMainWindow):
             selection-background-color: #1f6feb; selection-color: white;
         }
         QTextEdit { background: #1a1c1f; }
+        /* 文件列表、详细视图及侧栏都需要匹配深色文字的背景。 */
+        QFileDialog QAbstractItemView {
+            background: #1e2124; alternate-background-color: #2b2f33;
+            color: #e6e6e6; border: 1px solid #4a4f55;
+            selection-background-color: #1f6feb; selection-color: #ffffff;
+        }
+        QFileDialog QAbstractItemView::item:hover {
+            background: #343f4b; color: #ffffff;
+        }
+        QFileDialog QAbstractItemView::item:selected {
+            background: #1f6feb; color: #ffffff;
+        }
         QComboBox QAbstractItemView {
             background: #2b2f33;
             color: #e6e6e6;
@@ -686,6 +969,101 @@ class SerialTool(QMainWindow):
         row.addWidget(btn_add)
         row.addWidget(btn_del)
         v.addLayout(row)
+        return w
+
+    def _build_modbus_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+
+        form = QFormLayout()
+
+        top_row = QHBoxLayout()
+        self.spn_modbus_slave = QSpinBox()
+        self.spn_modbus_slave.setRange(0, 255)
+        self.spn_modbus_slave.setValue(1)
+        self.cmb_modbus_func = QComboBox()
+        for text, code in MODBUS_FUNCTIONS:
+            self.cmb_modbus_func.addItem(text, code)
+        self.cmb_modbus_func.currentIndexChanged.connect(self._on_modbus_func_changed)
+        self.chk_modbus_base1 = QCheckBox("按设备地址(Base 1)")
+        top_row.addWidget(QLabel("从站"))
+        top_row.addWidget(self.spn_modbus_slave)
+        top_row.addSpacing(8)
+        top_row.addWidget(QLabel("功能"))
+        top_row.addWidget(self.cmb_modbus_func, 1)
+        top_row.addSpacing(8)
+        top_row.addWidget(self.chk_modbus_base1)
+        form.addRow(top_row)
+
+        addr_row = QHBoxLayout()
+        self.spn_modbus_addr = QSpinBox()
+        self.spn_modbus_addr.setRange(0, 65535)
+        self.spn_modbus_qty = QSpinBox()
+        self.spn_modbus_qty.setRange(1, 2000)
+        self.spn_modbus_qty.setValue(1)
+        addr_row.addWidget(QLabel("地址"))
+        addr_row.addWidget(self.spn_modbus_addr)
+        addr_row.addSpacing(8)
+        addr_row.addWidget(QLabel("数量"))
+        addr_row.addWidget(self.spn_modbus_qty)
+        self.spn_modbus_scan = QSpinBox()
+        self.spn_modbus_scan.setRange(1, 3600000)
+        self.spn_modbus_scan.setValue(1000)
+        self.spn_modbus_scan.setSuffix(" ms")
+        self.chk_modbus_poll = QCheckBox("自动读取")
+        self.chk_modbus_poll.toggled.connect(self._toggle_modbus_poll)
+        self.chk_modbus_signed = QCheckBox("有符号16位")
+        self.chk_modbus_signed.setChecked(True)
+        self.chk_modbus_signed.toggled.connect(self._render_modbus_table)
+        addr_row.addWidget(QLabel("扫描周期"))
+        addr_row.addWidget(self.spn_modbus_scan)
+        addr_row.addWidget(self.chk_modbus_poll)
+        addr_row.addWidget(self.chk_modbus_signed)
+        form.addRow(addr_row)
+
+        self.edit_modbus_values = QLineEdit()
+        self.edit_modbus_values.setPlaceholderText("写操作输入数值，多个值用逗号分隔，例如：1, 2, 100 或 1,0,1,1")
+        form.addRow("写入值", self.edit_modbus_values)
+
+        v.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        self.btn_modbus_read = QPushButton("读取一次")
+        self.btn_modbus_write = QPushButton("写入一次")
+        self.btn_modbus_to_send = QPushButton("填入发送区")
+        self.btn_modbus_open = QPushButton("打开 MBP…")
+        self.btn_modbus_save = QPushButton("保存 MBP…")
+        self.btn_modbus_read.clicked.connect(self.on_modbus_read_clicked)
+        self.btn_modbus_write.clicked.connect(self.on_modbus_write_clicked)
+        self.btn_modbus_to_send.clicked.connect(self.on_modbus_fill_send_clicked)
+        self.btn_modbus_open.clicked.connect(self.on_modbus_open_profile)
+        self.btn_modbus_save.clicked.connect(self.on_modbus_save_profile)
+        btn_row.addWidget(self.btn_modbus_read)
+        btn_row.addWidget(self.btn_modbus_write)
+        btn_row.addWidget(self.btn_modbus_to_send)
+        btn_row.addStretch()
+        btn_row.addWidget(self.btn_modbus_open)
+        btn_row.addWidget(self.btn_modbus_save)
+        v.addLayout(btn_row)
+
+        self.modbus_result = QPlainTextEdit()
+        self.modbus_result.setReadOnly(True)
+        self.modbus_result.setPlaceholderText(
+            "Modbus RTU 解析结果显示在这里。\n"
+            "说明：当前实现基于现有串口连接，支持 01/02/03/04/05/06/15/16。"
+        )
+        self.modbus_result.setMaximumHeight(72)
+        v.addWidget(self.modbus_result)
+        self.modbus_table = QTableWidget(0, 4)
+        self.modbus_table.setHorizontalHeaderLabels(["Name", "值", "Name", "值"])
+        self.modbus_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.modbus_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.modbus_table.verticalHeader().setDefaultSectionSize(25)
+        self.modbus_table.cellDoubleClicked.connect(self._modbus_cell_to_write)
+        self.modbus_table.setToolTip("双击寄存器可填入单个写入表单；点击写入一次发送。")
+        v.addWidget(self.modbus_table, 1)
+
+        self._on_modbus_func_changed()
         return w
 
     def _make_center_checkbox(self, checked: bool) -> QWidget:
@@ -856,6 +1234,10 @@ class SerialTool(QMainWindow):
             self._open_log_file()
 
     def close_port(self):
+        self.chk_modbus_poll.setChecked(False)
+        self.modbus_timeout.stop()
+        self.pending_modbus_request = None
+        self.modbus_rx_buffer.clear()
         if self.reader:
             self.reader.stop()
             self.reader = None
@@ -940,6 +1322,9 @@ class SerialTool(QMainWindow):
         ts = f"[{now_ms()}] " if self.chk_show_time.isChecked() else ""
         self.append_log(f"{ts}<< {shown}", color="#1b5e20")
         self._write_log_raw(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} RX <- {shown}\n")
+
+        if self.pending_modbus_request:
+            self._receive_modbus_data(data)
 
         # 自动回复
         if self.chk_auto_reply.isChecked():
@@ -1072,6 +1457,343 @@ class SerialTool(QMainWindow):
                     self.append_log(f"[自动回复失败] {e}", color="#c0392b")
 
     # -------------------------------------------------------------- #
+    #  Modbus
+    # -------------------------------------------------------------- #
+    def _on_modbus_func_changed(self):
+        function_code = self.cmb_modbus_func.currentData()
+        is_read = function_code in (0x01, 0x02, 0x03, 0x04)
+        if not is_read:
+            self.chk_modbus_poll.setChecked(False)
+        is_multi_write = function_code in (0x0F, 0x10)
+        self.btn_modbus_read.setEnabled(is_read)
+        self.btn_modbus_write.setEnabled(not is_read)
+        self.spn_modbus_qty.setEnabled(is_read or is_multi_write)
+        self.edit_modbus_values.setEnabled(not is_read)
+
+        if function_code in (0x01, 0x02):
+            self.spn_modbus_qty.setRange(1, 2000)
+        elif function_code in (0x03, 0x04):
+            self.spn_modbus_qty.setRange(1, 125)
+        elif function_code == 0x0F:
+            self.spn_modbus_qty.setRange(1, 1968)
+        elif function_code == 0x10:
+            self.spn_modbus_qty.setRange(1, 123)
+        else:
+            self.spn_modbus_qty.setRange(1, 1)
+            self.spn_modbus_qty.setValue(1)
+
+    def _modbus_address_wire(self) -> int:
+        address = self.spn_modbus_addr.value()
+        if self.chk_modbus_base1.isChecked():
+            if address <= 0:
+                raise ValueError("Base 1 地址模式下，地址必须大于 0。")
+            address -= 1
+        return address
+
+    def _current_modbus_config(self) -> dict:
+        function_code = int(self.cmb_modbus_func.currentData())
+        address_wire = self._modbus_address_wire()
+        values = parse_number_list(self.edit_modbus_values.text()) if self.edit_modbus_values.text().strip() else []
+        quantity = self.spn_modbus_qty.value()
+        if function_code in (0x0F, 0x10) and values:
+            quantity = len(values)
+        return {
+            "slave_id": self.spn_modbus_slave.value(),
+            "function_code": function_code,
+            "address": address_wire,
+            "quantity": quantity,
+            "values": values,
+            "display_address": self.spn_modbus_addr.value(),
+            "base1": self.chk_modbus_base1.isChecked(),
+            "scan_rate": self.spn_modbus_scan.value(),
+            "signed": self.chk_modbus_signed.isChecked(),
+            "entries": self.modbus_entries,
+            "table_context": self.modbus_table_context,
+        }
+
+    def _format_modbus_result(self, result: dict) -> str:
+        lines = [
+            f"从站: {result['slave_id']}",
+            f"功能: {result['function_text']} (0x{result['function_code']:02X})",
+        ]
+        if "values" in result:
+            values = result["values"]
+            lines.append(f"数据: {', '.join(str(v) for v in values)}")
+        if "address" in result:
+            lines.append(f"地址: {result['address']}")
+        if "value" in result:
+            lines.append(f"回显值: {result['value']}")
+        if "quantity" in result:
+            lines.append(f"数量: {result['quantity']}")
+        return "\n".join(lines)
+
+    def _format_binary_mbp_profile(self, profile: dict) -> str:
+        return (f"已导入 Modbus Poll 配置：ID={profile['slave_id']}，"
+                f"F={profile['function_code']:02d}，地址=0x{profile['start_address']:04X}，"
+                f"数量={profile['quantity']}，SR={profile['scan_rate']} ms\n"
+                "表格显示文件保存值；读取成功后更新为设备实时值。")
+
+    def _render_modbus_table(self):
+        entries = self.modbus_entries
+        rows = min(16, len(entries))
+        groups = max(1, (len(entries) + 15) // 16)
+        self.modbus_table.setRowCount(rows)
+        self.modbus_table.setColumnCount(groups * 2)
+        headers = []
+        for group in range(groups):
+            idx = group * 16
+            headers.extend(["Name", f"{entries[idx]['address']:04X}" if idx < len(entries) else "值"])
+        self.modbus_table.setHorizontalHeaderLabels(headers)
+        self.modbus_table.setVerticalHeaderLabels([f"{i:X}" for i in range(rows)])
+        self.modbus_table.clearContents()
+        for i, entry in enumerate(entries):
+            row, col = i % 16, (i // 16) * 2
+            value = entry.get("value")
+            if value is not None and self.chk_modbus_signed.isChecked() and value >= 32768:
+                value -= 65536
+            for column, text in ((col, entry.get("comment", "")),
+                                 (col + 1, "未知" if value is None else str(value))):
+                item = QTableWidgetItem(text)
+                item.setToolTip(f"地址: {entry['address']} (0x{entry['address']:04X})")
+                self.modbus_table.setItem(row, column, item)
+
+    def _modbus_cell_to_write(self, row, column):
+        idx = (column // 2) * 16 + row
+        if idx >= len(self.modbus_entries) or not self.modbus_table_context:
+            return
+        slave, function = self.modbus_table_context
+        if function not in (1, 3):
+            return
+        entry = self.modbus_entries[idx]
+        self.chk_modbus_poll.setChecked(False)
+        self.spn_modbus_slave.setValue(slave)
+        self.cmb_modbus_func.setCurrentIndex(self.cmb_modbus_func.findData(5 if function == 1 else 6))
+        self.chk_modbus_base1.setChecked(False)
+        self.spn_modbus_addr.setValue(entry["address"])
+        self.edit_modbus_values.setText(str(entry["value"]) if entry.get("value") is not None else "")
+
+    def _toggle_modbus_poll(self, enabled):
+        if enabled:
+            if not (self.ser and self.ser.is_open) or self.cmb_modbus_func.currentData() not in (1, 2, 3, 4):
+                self.chk_modbus_poll.setChecked(False)
+                self.modbus_result.setPlainText("自动读取需要先打开串口并选择读功能码。")
+                return
+            self.modbus_poll_timer.start(self.spn_modbus_scan.value())
+            self._poll_modbus()
+        else:
+            self.modbus_poll_timer.stop()
+
+    def _poll_modbus(self):
+        self.modbus_poll_timer.setInterval(self.spn_modbus_scan.value())
+        if self.pending_modbus_request:
+            return
+        try:
+            self._send_modbus_request(self._current_modbus_config())
+        except Exception as e:
+            self.chk_modbus_poll.setChecked(False)
+            self.modbus_result.setPlainText(str(e))
+
+    def _on_modbus_timeout(self):
+        self.modbus_timeout.stop()
+        self.pending_modbus_request = None
+        self.modbus_rx_buffer.clear()
+        self.modbus_result.setPlainText("Modbus 响应超时，请检查从站、串口参数与接线。")
+
+    def _receive_modbus_data(self, data):
+        self.modbus_rx_buffer.extend(data)
+        request = self.pending_modbus_request
+        buf = self.modbus_rx_buffer
+        while len(buf) >= 2:
+            if buf[0] != request["slave_id"] or buf[1] not in (request["function_code"], request["function_code"] | 0x80):
+                del buf[0]
+                continue
+            if len(buf) < 3:
+                return
+            size = 5 if buf[1] & 0x80 else 5 + buf[2] if buf[1] in (1, 2, 3, 4) else 8
+            if len(buf) < size:
+                return
+            frame = bytes(buf[:size])
+            if calc_crc16_modbus(frame[:-2]) != frame[-2:]:
+                del buf[0]
+                continue
+            self.modbus_timeout.stop()
+            self.pending_modbus_request = None
+            buf.clear()
+            try:
+                result = parse_modbus_rtu_response(request, frame)
+                if "values" in result:
+                    context = [request["slave_id"], request["function_code"]]
+                    old = {e["address"]: e for e in self.modbus_entries} if self.modbus_table_context == context else {}
+                    self.modbus_entries = [
+                        {"address": request["address"] + i, "value": value,
+                         "comment": old.get(request["address"] + i, {}).get("comment", "")}
+                        for i, value in enumerate(result["values"])
+                    ]
+                    self.modbus_table_context = context
+                    self._render_modbus_table()
+                self.modbus_result.setPlainText(self._format_modbus_result(result))
+            except ValueError as e:
+                self.modbus_result.setPlainText(f"Modbus 响应解析失败：{e}")
+            return
+
+    def _send_modbus_request(self, config: dict, update_send_editor: bool = False):
+        frame = build_modbus_rtu_request(
+            config["slave_id"],
+            config["function_code"],
+            config["address"],
+            config["quantity"],
+            config["values"],
+        )
+        hex_frame = bytes_to_hex_str(frame)
+        if update_send_editor:
+            self.send_edit.setPlainText(hex_frame)
+            self.chk_tx_hex.setChecked(True)
+            self.modbus_result.setPlainText(f"待发送帧：\n{hex_frame}")
+            return frame
+
+        if not (self.ser and self.ser.is_open):
+            self.modbus_result.setPlainText(f"待发送帧：\n{hex_frame}")
+            return frame
+
+        if self.pending_modbus_request:
+            raise ValueError("正在等待上一次 Modbus 响应，请稍后重试。")
+        self.modbus_rx_buffer.clear()
+        written = self.ser.write(frame)
+        if written != len(frame):
+            raise ValueError("Modbus 请求未完整发送。")
+        self.pending_modbus_request = {
+            **config,
+            "tx_hex": hex_frame,
+        }
+        self.modbus_timeout.start(1000)
+        self.tx_bytes += len(frame)
+        self._update_counter()
+        ts = f"[{now_ms()}] " if self.chk_show_time.isChecked() else ""
+        self.append_log(f"{ts}>> [Modbus] {hex_frame}", color="#0d47a1")
+        self._write_log_raw(
+            f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} TX[Modbus] -> {hex_frame}\n")
+        self.modbus_result.setPlainText(f"请求已发送：\n{hex_frame}")
+        return frame
+
+    def on_modbus_read_clicked(self):
+        try:
+            config = self._current_modbus_config()
+            if config["function_code"] not in (0x01, 0x02, 0x03, 0x04):
+                raise ValueError("当前功能码不是读操作。")
+            self._send_modbus_request(config)
+        except Exception as e:
+            QMessageBox.warning(self, "Modbus", str(e))
+
+    def on_modbus_write_clicked(self):
+        try:
+            config = self._current_modbus_config()
+            if config["function_code"] in (0x01, 0x02, 0x03, 0x04):
+                raise ValueError("当前功能码不是写操作。")
+            self._send_modbus_request(config)
+        except Exception as e:
+            QMessageBox.warning(self, "Modbus", str(e))
+
+    def on_modbus_fill_send_clicked(self):
+        try:
+            config = self._current_modbus_config()
+            self._send_modbus_request(config, update_send_editor=True)
+        except Exception as e:
+            QMessageBox.warning(self, "Modbus", str(e))
+
+    def _set_modbus_config(self, config: dict):
+        self.chk_modbus_poll.setChecked(False)
+        self.modbus_timeout.stop()
+        self.pending_modbus_request = None
+        self.modbus_rx_buffer.clear()
+        self.spn_modbus_slave.setValue(int(config.get("slave_id", 1)))
+        function_code = int(config.get("function_code", 0x03))
+        idx = self.cmb_modbus_func.findData(function_code)
+        if idx >= 0:
+            self.cmb_modbus_func.setCurrentIndex(idx)
+        self.chk_modbus_base1.setChecked(bool(config.get("base1", False)))
+        self.spn_modbus_addr.setValue(int(config.get("display_address", config.get("address", 0))))
+        self.spn_modbus_qty.setValue(max(1, int(config.get("quantity", 1))))
+        self.edit_modbus_values.setText(", ".join(str(v) for v in config.get("values", [])))
+        self.spn_modbus_scan.setValue(int(config.get("scan_rate", 1000)))
+        self.chk_modbus_signed.setChecked(bool(config.get("signed", True)))
+        self.modbus_entries = config.get("entries", [])
+        self.modbus_table_context = config.get("table_context", [self.spn_modbus_slave.value(), function_code])
+        self._render_modbus_table()
+        self._on_modbus_func_changed()
+
+    def on_modbus_open_profile(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "打开 Modbus 配置",
+            str(Path.home()),
+            "Modbus Profile (*.mbp *.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            data = Path(path).read_bytes()
+        except Exception as e:
+            QMessageBox.warning(self, "打开失败", str(e))
+            return
+
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except Exception:
+            profile = parse_binary_mbp_profile(data)
+            if not profile:
+                QMessageBox.warning(
+                    self,
+                    "打开失败",
+                    "该 .mbp 不是本工具保存的 JSON 配置，或属于尚未支持/已损坏的 Modbus Poll 二进制版本。",
+                )
+                return
+            self._set_modbus_config({
+                "slave_id": profile["slave_id"],
+                "scan_rate": profile["scan_rate"],
+                "signed": profile["signed"],
+                "entries": profile["entries"],
+                "function_code": profile["function_code"],
+                "address": profile["start_address"],
+                "display_address": profile["start_address"],
+                "quantity": profile["quantity"],
+                "values": [],
+                "base1": False,
+            })
+            self.modbus_result.setPlainText(self._format_binary_mbp_profile(profile))
+            self.status.showMessage(f"已导入 {os.path.basename(path)}", 5000)
+            return
+
+        if not isinstance(payload, dict) or payload.get("format") != "qt5com-mbp":
+            QMessageBox.warning(self, "打开失败", "文件格式不是 qt5com 的 Modbus 配置。")
+            return
+
+        self._set_modbus_config(payload.get("modbus", {}))
+        self.modbus_result.setPlainText(f"已打开配置：{path}")
+        self.status.showMessage(f"已打开 {os.path.basename(path)}", 3000)
+
+    def on_modbus_save_profile(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存 Modbus 配置",
+            str(Path.home() / "modbus_profile.mbp"),
+            "Modbus Profile (*.mbp);;JSON (*.json)",
+        )
+        if not path:
+            return
+        payload = {
+            "format": "qt5com-mbp",
+            "version": 1,
+            "modbus": self._current_modbus_config(),
+        }
+        try:
+            Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            QMessageBox.warning(self, "保存失败", str(e))
+            return
+        self.status.showMessage(f"已保存 {os.path.basename(path)}", 3000)
+        self.modbus_result.setPlainText(f"已保存配置：{path}")
+
+    # -------------------------------------------------------------- #
     #  计数器
     # -------------------------------------------------------------- #
     def _update_counter(self):
@@ -1119,6 +1841,13 @@ class SerialTool(QMainWindow):
         self.cmb_checksum.setCurrentText(s.value("chk_type", "SUM (1B)"))
         self.spn_chk_start.setValue(int(s.value("chk_start", 1)))
         self.spn_chk_end.setValue(int(s.value("chk_end", 0)))
+
+        modbus_raw = s.value("modbus_profile", "")
+        if modbus_raw:
+            try:
+                self._set_modbus_config(json.loads(modbus_raw))
+            except Exception:
+                pass
 
         # 历史
         hist = s.value("history", [])
@@ -1188,6 +1917,7 @@ class SerialTool(QMainWindow):
         s.setValue("chk_type", self.cmb_checksum.currentText())
         s.setValue("chk_start", self.spn_chk_start.value())
         s.setValue("chk_end", self.spn_chk_end.value())
+        s.setValue("modbus_profile", json.dumps(self._current_modbus_config(), ensure_ascii=False))
 
         hist = [self.cmb_history.itemText(i) for i in range(self.cmb_history.count())]
         s.setValue("history", json.dumps(hist, ensure_ascii=False))
