@@ -113,6 +113,7 @@ sudo ./install.sh --uninstall     # 卸载
 - 终端命令：`qt5com`
 - 应用菜单：`Serial Debug Tool`
 - 桌面图标：`/usr/share/pixmaps/qt5com.png`
+  - 同时按 Freedesktop 图标主题规范安装到 `/usr/share/icons/hicolor/256x256/apps/qt5com.png` 并刷新缓存，兼容 XFCE、GNOME、KDE 等桌面菜单。GNOME 通过 `qt5com.desktop` 和 `StartupWMClass` 将菜单、Dock 与运行窗口归为同一应用。
 - 配置文件：
   - 便携模式（程序所在目录可写时）：`<程序目录>/serial_tool.ini`
   - 系统安装（`/opt/qt5com`）默认安装目录已开放可写权限，因此仍为 `/opt/qt5com/serial_tool.ini`
@@ -159,6 +160,7 @@ python3 gen_icon.py           # 重新生成 app.png / app.ico
 - 修复“填入发送区”意外发送的问题，现在仅生成待发送帧。
 - 保存和恢复配置时保留寄存器名称、保存值、扫描周期和显示选项。
 - 修复深色主题文件对话框的文字对比度，统一文件列表、详细视图和侧栏背景，补充悬停与选中样式。
+- 修复 XFCE 应用菜单和窗口可能不显示图标的问题，按 Freedesktop hicolor 图标主题规范安装并刷新缓存。
 - 增加 7 项 Modbus 回归测试；已通过软件测试，实际设备通信仍需按硬件环境验证。
 
 ---

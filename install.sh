@@ -18,6 +18,8 @@ INSTALL_DIR="/opt/qt5com"
 BIN_LINK="/usr/local/bin/qt5com"
 DESKTOP_FILE="/usr/share/applications/qt5com.desktop"
 ICON_DEST="/usr/share/pixmaps/qt5com.png"
+THEME_ICON_DEST="/usr/share/icons/hicolor/256x256/apps/qt5com.png"
+ICON_THEME_DIR="/usr/share/icons/hicolor"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
@@ -32,7 +34,7 @@ uninstall() {
     need_root "$@"
     echo ">>> 卸载 $APP_NAME ..."
     rm -rf "$INSTALL_DIR"
-    rm -f  "$BIN_LINK" "$DESKTOP_FILE" "$ICON_DEST"
+    rm -f  "$BIN_LINK" "$DESKTOP_FILE" "$ICON_DEST" "$THEME_ICON_DEST"
 
     # 清理各用户的配置文件 (~/.config/qt5com)
     echo ">>> 清理用户配置文件 ..."
@@ -50,6 +52,8 @@ uninstall() {
     fi
 
     command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q || true
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+        gtk-update-icon-cache -f -t "$ICON_THEME_DIR" >/dev/null 2>&1 || true
     echo "✔ 卸载完成。"
 }
 
@@ -87,6 +91,10 @@ install_app() {
     if [[ -n "$ICON_SRC" ]]; then
         install -m 0644 "$ICON_SRC" "$INSTALL_DIR/app.png"
         install -m 0644 "$ICON_SRC" "$ICON_DEST"
+        # XFCE and other Freedesktop desktops resolve Icon= names through the
+        # active icon theme. /usr/share/pixmaps alone is not reliable there.
+        mkdir -p "$(dirname "$THEME_ICON_DEST")"
+        install -m 0644 "$ICON_SRC" "$THEME_ICON_DEST"
     fi
     # 放开安装目录权限, 便于普通用户在此目录保存配置/日志 (便携模式)
     chmod 0755 "$INSTALL_DIR"
@@ -102,16 +110,20 @@ Name=$APP_NAME
 GenericName=Serial Debug Tool
 Comment=串口调试工具 (PyQt5)
 Exec=$INSTALL_DIR/qt5com
-Icon=${ICON_DEST:-$INSTALL_DIR/app.png}
+Icon=$APP_ID
 Terminal=false
-Categories=Development;Utility;Electronics;
+Categories=Development;Electronics;
 Keywords=serial;uart;com;rs232;debug;
 StartupNotify=true
+StartupWMClass=SerialDebugTool
+DBusActivatable=false
 EOF
     chmod 0644 "$DESKTOP_FILE"
 
     # 6. 更新桌面数据库
     command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q || true
+    command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+        gtk-update-icon-cache -f -t "$ICON_THEME_DIR" >/dev/null 2>&1 || true
 
     # 7. 确保 dialout 组提示
     echo

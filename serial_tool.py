@@ -534,6 +534,10 @@ class SerialTool(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Serial Debug Tool")
+        icon_path = os.path.join(app_dir(), "app.png")
+        self.setWindowIcon(
+            QIcon(icon_path) if os.path.isfile(icon_path)
+            else QIcon.fromTheme("qt5com"))
         self.resize(1200, 900)
 
         self.ser: serial.Serial | None = None
@@ -2217,6 +2221,16 @@ class SerialTool(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("SerialDebugTool")
+    app.setApplicationDisplayName("Serial Debug Tool")
+    app.setOrganizationName("RUIO")
+    # GNOME Shell uses the desktop file ID to associate a running window with
+    # its launcher and icon. The value must match qt5com.desktop without suffix.
+    if hasattr(app, "setDesktopFileName"):
+        app.setDesktopFileName("qt5com")
+    theme_icon = QIcon.fromTheme("qt5com")
+    bundled_icon = os.path.join(app_dir(), "app.png")
+    app.setWindowIcon(
+        QIcon(bundled_icon) if os.path.isfile(bundled_icon) else theme_icon)
     w = SerialTool()
     w.show()
     sys.exit(app.exec_())
