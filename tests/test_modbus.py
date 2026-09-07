@@ -123,6 +123,46 @@ class ModbusTests(unittest.TestCase):
         self.assertEqual(self.w.cmb_modbus_func.currentData(), 6)
         self.assertEqual(self.w.edit_modbus_values.text(), '65535')
 
+    def test_edit_imported_profile_roundtrip(self):
+        self.w.chk_modbus_edit.setChecked(True)
+        self.w.modbus_table.item(0, 0).setText('修改名称')
+        self.w.modbus_table.item(0, 1).setText('-2')
+        self.assertEqual(self.w.modbus_entries[0]['value'], 65534)
+        self.w.modbus_table.item(1, 1).setText('999999')
+        self.assertEqual(self.w.modbus_entries[1]['value'], 0)
+        self.w._modbus_cell_to_write(0, 1)
+        self.assertEqual(self.w.cmb_modbus_func.currentData(), 3)
+        out = self.tmp.name + '/edited.mbp'
+        with patch.object(m.QFileDialog, 'getSaveFileName', return_value=(out, '')):
+            self.w.on_modbus_save_profile()
+        with patch.object(m.QFileDialog, 'getOpenFileName', return_value=(out, '')):
+            self.w.on_modbus_open_profile()
+        self.assertEqual(self.w.modbus_table.item(0, 0).text(), '修改名称')
+        self.assertEqual(self.w.modbus_table.item(0, 1).text(), '-2')
+        self.assertEqual(len(self.w.modbus_entries), 32)
+
+    def test_new_profile_and_edit_does_not_send(self):
+        ser = self.connect_fake()
+        self.w.spn_modbus_addr.setValue(100)
+        self.w.spn_modbus_qty.setValue(3)
+        self.w.on_modbus_new_profile()
+        self.assertEqual([e['address'] for e in self.w.modbus_entries], [100, 101, 102])
+        self.assertTrue(self.w.chk_modbus_edit.isChecked())
+        self.w.modbus_table.item(2, 0).setText('新寄存器')
+        self.w.modbus_table.item(2, 1).setText('0xFF')
+        self.w.chk_modbus_poll.setChecked(True)
+        self.assertFalse(self.w.chk_modbus_poll.isChecked())
+        self.assertEqual(ser.frames, [])
+        out = self.tmp.name + '/new'
+        with patch.object(m.QFileDialog, 'getSaveFileName', return_value=(out, '')):
+            self.w.on_modbus_save_profile()
+        with patch.object(m.QFileDialog, 'getOpenFileName', return_value=(out + '.mbp', '')):
+            self.w.on_modbus_open_profile()
+        self.assertEqual(self.w.spn_modbus_addr.value(), 100)
+        self.assertEqual(self.w.spn_modbus_qty.value(), 3)
+        self.assertEqual(self.w.modbus_entries[2]['comment'], '新寄存器')
+        self.assertEqual(self.w.modbus_entries[2]['value'], 255)
+
     def test_protocol_validation(self):
         request = dict(slave_id=1, function_code=3, address=4000, quantity=32)
         with self.assertRaises(ValueError):

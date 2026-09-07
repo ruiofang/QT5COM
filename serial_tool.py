@@ -96,7 +96,7 @@ from PyQt5.QtWidgets import (
     QGridLayout, QGroupBox, QSplitter, QFileDialog, QMessageBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QStatusBar, QSpinBox, QTabWidget, QAction,
     QStyleFactory, QToolButton, QSizePolicy, QAbstractItemView,
-    QFormLayout,
+    QFormLayout, QInputDialog,
 )
 
 import serial
@@ -1041,6 +1041,11 @@ class SerialTool(QMainWindow):
         self.btn_modbus_read = QPushButton("读取一次")
         self.btn_modbus_write = QPushButton("写入一次")
         self.btn_modbus_to_send = QPushButton("填入发送区")
+        self.btn_modbus_new = QPushButton("新建 MBP")
+        self.btn_modbus_new.setToolTip("按当前从站、读功能、地址和数量建立空白表格")
+        self.btn_modbus_new.clicked.connect(self.on_modbus_new_profile)
+        self.chk_modbus_edit = QCheckBox("编辑配置")
+        self.chk_modbus_edit.toggled.connect(self._toggle_modbus_edit)
         self.btn_modbus_open = QPushButton("打开 MBP…")
         self.btn_modbus_save = QPushButton("保存 MBP…")
         self.btn_modbus_read.clicked.connect(self.on_modbus_read_clicked)
@@ -1052,6 +1057,8 @@ class SerialTool(QMainWindow):
         btn_row.addWidget(self.btn_modbus_write)
         btn_row.addWidget(self.btn_modbus_to_send)
         btn_row.addStretch()
+        btn_row.addWidget(self.btn_modbus_new)
+        btn_row.addWidget(self.chk_modbus_edit)
         btn_row.addWidget(self.btn_modbus_open)
         btn_row.addWidget(self.btn_modbus_save)
         v.addLayout(btn_row)
@@ -1070,7 +1077,22 @@ class SerialTool(QMainWindow):
         self.modbus_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.modbus_table.verticalHeader().setDefaultSectionSize(25)
         self.modbus_table.cellDoubleClicked.connect(self._modbus_cell_to_write)
-        self.modbus_table.setToolTip("双击寄存器可填入单个写入表单；点击写入一次发送。")
+        self.modbus_table.itemChanged.connect(self._on_modbus_item_changed)
+        self.modbus_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.modbus_table.setToolTip("勾选编辑配置后双击修改名称/值；退出编辑后双击可填入设备写入表单。")
+        edit_row = QHBoxLayout()
+        self.btn_modbus_clear_items = QPushButton("清空所选项")
+        self.btn_modbus_clear_items.setToolTip("清除所选寄存器的名称和值，保留地址和数量；可用 Ctrl/Shift 多选")
+        self.btn_modbus_clear_items.clicked.connect(self.on_modbus_clear_items)
+        self.btn_modbus_trim = QPushButton("缩减末尾项…")
+        self.btn_modbus_trim.setToolTip("指定保留数量，只移除末尾寄存器，并同步读取参数")
+        self.btn_modbus_trim.clicked.connect(self.on_modbus_trim)
+        self.btn_modbus_clear_items.setEnabled(False)
+        self.btn_modbus_trim.setEnabled(False)
+        edit_row.addWidget(self.btn_modbus_clear_items)
+        edit_row.addWidget(self.btn_modbus_trim)
+        edit_row.addStretch()
+        v.addLayout(edit_row)
         v.addWidget(self.modbus_table, 1)
 
         self._on_modbus_func_changed()
@@ -1562,6 +1584,7 @@ class SerialTool(QMainWindow):
                 "表格显示文件保存值；读取成功后更新为设备实时值。")
 
     def _render_modbus_table(self):
+        blocked = self.modbus_table.blockSignals(True)
         entries = self.modbus_entries
         rows = min(16, len(entries))
         groups = max(1, (len(entries) + 15) // 16)
@@ -1584,8 +1607,11 @@ class SerialTool(QMainWindow):
                 item = QTableWidgetItem(text)
                 item.setToolTip(f"地址: {entry['address']} (0x{entry['address']:04X})")
                 self.modbus_table.setItem(row, column, item)
+        self.modbus_table.blockSignals(blocked)
 
     def _modbus_cell_to_write(self, row, column):
+        if self.chk_modbus_edit.isChecked():
+            return
         idx = (column // 2) * 16 + row
         if idx >= len(self.modbus_entries) or not self.modbus_table_context:
             return
@@ -1601,6 +1627,10 @@ class SerialTool(QMainWindow):
         self.edit_modbus_values.setText(str(entry["value"]) if entry.get("value") is not None else "")
 
     def _toggle_modbus_poll(self, enabled):
+        if enabled and self.chk_modbus_edit.isChecked():
+            self.chk_modbus_poll.setChecked(False)
+            self.modbus_result.setPlainText("请先退出编辑配置，再开始自动读取。")
+            return
         if enabled:
             if not (self.ser and self.ser.is_open) or self.cmb_modbus_func.currentData() not in (1, 2, 3, 4):
                 self.chk_modbus_poll.setChecked(False)
@@ -1665,6 +1695,8 @@ class SerialTool(QMainWindow):
             return
 
     def _send_modbus_request(self, config: dict, update_send_editor: bool = False):
+        if self.chk_modbus_edit.isChecked() and not update_send_editor:
+            raise ValueError("请先退出编辑配置，再与设备通信。")
         frame = build_modbus_rtu_request(
             config["slave_id"],
             config["function_code"],
@@ -1729,6 +1761,7 @@ class SerialTool(QMainWindow):
             QMessageBox.warning(self, "Modbus", str(e))
 
     def _set_modbus_config(self, config: dict):
+        self.chk_modbus_edit.setChecked(False)
         self.chk_modbus_poll.setChecked(False)
         self.modbus_timeout.stop()
         self.pending_modbus_request = None
@@ -1748,6 +1781,108 @@ class SerialTool(QMainWindow):
         self.modbus_table_context = config.get("table_context", [self.spn_modbus_slave.value(), function_code])
         self._render_modbus_table()
         self._on_modbus_func_changed()
+
+    def _toggle_modbus_edit(self, enabled):
+        if enabled:
+            self.chk_modbus_poll.setChecked(False)
+            if self.pending_modbus_request:
+                self.chk_modbus_edit.setChecked(False)
+                self.modbus_result.setPlainText("请等待当前请求完成后再编辑配置。")
+                return
+        self.modbus_table.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+            if enabled else QAbstractItemView.NoEditTriggers)
+        self.btn_modbus_clear_items.setEnabled(enabled)
+        self.btn_modbus_trim.setEnabled(enabled)
+
+    def on_modbus_clear_items(self):
+        if not self.chk_modbus_edit.isChecked():
+            return
+        indices = {item.column() // 2 * 16 + item.row()
+                   for item in self.modbus_table.selectedItems()}
+        indices = {i for i in indices if i < len(self.modbus_entries)}
+        if not indices:
+            self.modbus_result.setPlainText("请先选中要清空的寄存器名称或值，可用 Ctrl/Shift 多选。")
+            return
+        for i in indices:
+            self.modbus_entries[i].update(comment="", value=None)
+        self._render_modbus_table()
+        self.modbus_result.setPlainText(f"已清空 {len(indices)} 项，地址和数量保持不变；请保存 MBP。")
+
+    def on_modbus_trim(self):
+        if not self.chk_modbus_edit.isChecked():
+            return
+        total = len(self.modbus_entries)
+        if total <= 1 or not self.modbus_table_context:
+            self.modbus_result.setPlainText("至少需要保留 1 项，当前表格无法继续缩减。")
+            return
+        count, accepted = QInputDialog.getInt(
+            self, "缩减末尾项", f"当前 {total} 项，保留前多少项？", total - 1, 1, total - 1)
+        if not accepted:
+            return
+        entries = self.modbus_entries[:count]
+        slave, function = self.modbus_table_context
+        # Use the table's source context, even if the form was switched to a single write.
+        self._set_modbus_config({
+            "slave_id": slave, "function_code": function,
+            "address": entries[0]["address"], "quantity": count,
+            "entries": entries, "table_context": [slave, function],
+            "scan_rate": self.spn_modbus_scan.value(),
+            "signed": self.chk_modbus_signed.isChecked(),
+        })
+        self.chk_modbus_edit.setChecked(True)
+        self.modbus_result.setPlainText(f"已保留前 {count} 项，移除末尾 {total - count} 项；读取参数已同步，请保存 MBP。")
+
+    def _on_modbus_item_changed(self, item):
+        idx = item.column() // 2 * 16 + item.row()
+        if not self.chk_modbus_edit.isChecked() or idx >= len(self.modbus_entries):
+            return
+        entry = self.modbus_entries[idx]
+        if item.column() % 2 == 0:
+            entry["comment"] = item.text()
+        else:
+            text = item.text().strip()
+            try:
+                if not text or text == "未知":
+                    value = None
+                else:
+                    value = int(text, 16) if text.lower().startswith("0x") else int(text)
+                    function = self.modbus_table_context[1]
+                    minimum = -32768 if self.chk_modbus_signed.isChecked() else 0
+                    if function in (1, 2):
+                        if value not in (0, 1):
+                            raise ValueError("线圈值只能为 0 或 1。")
+                    elif not minimum <= value <= 65535:
+                        raise ValueError(f"寄存器值范围为 {minimum}~65535。")
+                    value &= 0xFFFF
+                entry["value"] = value
+            except ValueError as e:
+                self.modbus_result.setPlainText(f"数值无效，已恢复原值：{e}")
+                self._render_modbus_table()
+                return
+        self.modbus_result.setPlainText("配置已修改，请点击保存 MBP；编辑不会写入设备。")
+
+    def on_modbus_new_profile(self):
+        try:
+            if self.pending_modbus_request:
+                raise ValueError("请等待当前请求完成后再新建配置。")
+            function = self.cmb_modbus_func.currentData()
+            if function not in (1, 2, 3, 4):
+                raise ValueError("新建表格前请选择 01/02/03/04 读功能码。")
+            address = self._modbus_address_wire()
+            quantity = self.spn_modbus_qty.value()
+            build_modbus_rtu_request(self.spn_modbus_slave.value(), function, address, quantity)
+            self.chk_modbus_poll.setChecked(False)
+            self.modbus_entries = [
+                {"address": address + i, "comment": "", "value": 0}
+                for i in range(quantity)
+            ]
+            self.modbus_table_context = [self.spn_modbus_slave.value(), function]
+            self._render_modbus_table()
+            self.chk_modbus_edit.setChecked(True)
+            self.modbus_result.setPlainText("已按当前参数新建配置；双击名称或值进行编辑，然后保存 MBP。")
+        except ValueError as e:
+            QMessageBox.warning(self, "新建失败", str(e))
 
     def on_modbus_open_profile(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1804,16 +1939,18 @@ class SerialTool(QMainWindow):
             self,
             "保存 Modbus 配置",
             str(Path.home() / "modbus_profile.mbp"),
-            "Modbus Profile (*.mbp);;JSON (*.json)",
+            "QT5COM Profile (*.mbp);;JSON (*.json)",
         )
         if not path:
             return
-        payload = {
-            "format": "qt5com-mbp",
-            "version": 1,
-            "modbus": self._current_modbus_config(),
-        }
         try:
+            if not Path(path).suffix:
+                path += ".mbp"
+            payload = {
+                "format": "qt5com-mbp",
+                "version": 1,
+                "modbus": self._current_modbus_config(),
+            }
             Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             QMessageBox.warning(self, "保存失败", str(e))
