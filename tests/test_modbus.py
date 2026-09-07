@@ -163,6 +163,49 @@ class ModbusTests(unittest.TestCase):
         self.assertEqual(self.w.modbus_entries[2]['comment'], '新寄存器')
         self.assertEqual(self.w.modbus_entries[2]['value'], 255)
 
+    def test_clear_selected_registers_preserves_addresses(self):
+        self.w.chk_modbus_edit.setChecked(True)
+        self.w.modbus_table.item(0, 0).setSelected(True)
+        self.w.modbus_table.item(0, 1).setSelected(True)
+        self.w.modbus_table.item(1, 3).setSelected(True)
+        self.w.btn_modbus_clear_items.click()
+        self.assertEqual(len(self.w.modbus_entries), 32)
+        for index in (0, 17):
+            self.assertEqual(self.w.modbus_entries[index]['address'], 4000 + index)
+            self.assertEqual(self.w.modbus_entries[index]['comment'], '')
+            self.assertIsNone(self.w.modbus_entries[index]['value'])
+        self.assertEqual(self.w.modbus_entries[16]['comment'], '预设速度寄存器4')
+        out = self.tmp.name + '/cleared.mbp'
+        with patch.object(m.QFileDialog, 'getSaveFileName', return_value=(out, '')):
+            self.w.on_modbus_save_profile()
+        with patch.object(m.QFileDialog, 'getOpenFileName', return_value=(out, '')):
+            self.w.on_modbus_open_profile()
+        self.assertIsNone(self.w.modbus_entries[17]['value'])
+        self.assertEqual(self.w.modbus_entries[17]['address'], 4017)
+
+    def test_trim_preserves_prefix_and_syncs_read_config(self):
+        self.w._modbus_cell_to_write(1, 3)
+        self.w.chk_modbus_edit.setChecked(True)
+        with patch.object(m.QInputDialog, 'getInt', return_value=(16, False)):
+            self.w.on_modbus_trim()
+        self.assertEqual(len(self.w.modbus_entries), 32)
+        with patch.object(m.QInputDialog, 'getInt', return_value=(16, True)):
+            self.w.on_modbus_trim()
+        self.assertEqual(len(self.w.modbus_entries), 16)
+        self.assertEqual(self.w.modbus_entries[-1]['address'], 4015)
+        self.assertEqual(self.w.modbus_entries[-1]['comment'], '预设位置寄存器4')
+        self.assertEqual(self.w.spn_modbus_qty.value(), 16)
+        self.assertEqual(self.w.spn_modbus_addr.value(), 4000)
+        self.assertEqual(self.w.cmb_modbus_func.currentData(), 3)
+        self.assertEqual(self.w.modbus_table.columnCount(), 2)
+        out = self.tmp.name + '/trimmed.mbp'
+        with patch.object(m.QFileDialog, 'getSaveFileName', return_value=(out, '')):
+            self.w.on_modbus_save_profile()
+        with patch.object(m.QFileDialog, 'getOpenFileName', return_value=(out, '')):
+            self.w.on_modbus_open_profile()
+        self.assertEqual(len(self.w.modbus_entries), 16)
+        self.assertEqual(self.w.spn_modbus_qty.value(), 16)
+
     def test_protocol_validation(self):
         request = dict(slave_id=1, function_code=3, address=4000, quantity=32)
         with self.assertRaises(ValueError):
