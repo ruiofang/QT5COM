@@ -24,6 +24,7 @@ import json
 import time
 import datetime
 import struct
+import re
 from pathlib import Path
 
 
@@ -106,6 +107,52 @@ import serial.tools.list_ports
 # ------------------------------------------------------------------ #
 #  工具函数
 # ------------------------------------------------------------------ #
+def _linux_uart_is_real(device: str) -> bool:
+    """Return False for the common ttyS placeholders reported as unknown UARTs."""
+    name = os.path.basename(device)
+    if not re.fullmatch(r"ttyS\d+", name):
+        return True
+    try:
+        text = Path("/proc/tty/driver/serial").read_text(
+            encoding="ascii", errors="ignore")
+    except OSError:
+        # If the kernel does not expose the table, retain an explicitly bound
+        # non-serial8250 port rather than hiding legitimate embedded hardware.
+        driver = Path("/sys/class/tty") / name / "device/driver"
+        try:
+            return driver.exists() and driver.resolve().name != "serial8250"
+        except OSError:
+            return False
+    index = name[4:]
+    match = re.search(rf"(?m)^{re.escape(index)}:\s+uart:(\S+)", text)
+    return bool(match and match.group(1).lower() != "unknown")
+
+
+def serial_port_usability(port) -> tuple[bool, str]:
+    """Classify an enumerated port without opening it or toggling DTR/RTS."""
+    device = str(getattr(port, "device", "") or "")
+    if not device:
+        return False, "设备路径为空"
+    if sys.platform.startswith("linux"):
+        if not os.path.exists(device):
+            return False, "设备节点不存在"
+        if not os.access(device, os.R_OK | os.W_OK):
+            return False, "当前用户无读写权限"
+        name = os.path.basename(device)
+        if name in ("tty", "ttyprintk") or name.startswith(("pts", "ptmx")):
+            return False, "系统虚拟终端"
+        if not _linux_uart_is_real(device):
+            return False, "内核未检测到 UART 硬件"
+    elif sys.platform == "darwin":
+        # macOS exposes tty.* and cu.* pairs; cu.* is intended for initiating
+        # outgoing serial connections and avoids duplicate devices.
+        if device.startswith("/dev/tty."):
+            return False, "与 cu.* 重复的呼入端口"
+        if not os.path.exists(device) or not os.access(device, os.R_OK | os.W_OK):
+            return False, "设备不存在或无读写权限"
+    return True, "可用"
+
+
 def hex_str_to_bytes(text: str) -> bytes:
     """将 '01 A2 FF' 或 '01A2FF' 形式的字符串转为 bytes。"""
     clean = "".join(ch for ch in text if ch in "0123456789abcdefABCDEF")
@@ -539,6 +586,10 @@ class SerialTool(QMainWindow):
         self.btn_refresh.setText("⟳")
         self.btn_refresh.setToolTip("刷新串口")
         self.btn_refresh.clicked.connect(self.refresh_ports)
+        self.chk_show_all_ports = QCheckBox("显示全部")
+        self.chk_show_all_ports.setToolTip(
+            "显示系统枚举的全部端口，包括无权限、虚拟端口及未检测到硬件的 ttyS 端口")
+        self.chk_show_all_ports.toggled.connect(self.refresh_ports)
 
         self.cmb_baud = QComboBox()
         self.cmb_baud.setEditable(True)  # 支持自定义
@@ -558,6 +609,7 @@ class SerialTool(QMainWindow):
         g.addWidget(QLabel("端口"), row, 0)
         g.addWidget(self.cmb_port, row, 1)
         g.addWidget(self.btn_refresh, row, 2); row += 1
+        g.addWidget(self.chk_show_all_ports, row, 1, 1, 2); row += 1
         g.addWidget(QLabel("波特率"), row, 0); g.addWidget(self.cmb_baud, row, 1, 1, 2); row += 1
         g.addWidget(QLabel("数据位"), row, 0); g.addWidget(self.cmb_data, row, 1, 1, 2); row += 1
         g.addWidget(QLabel("校验位"), row, 0); g.addWidget(self.cmb_parity, row, 1, 1, 2); row += 1
@@ -1195,25 +1247,49 @@ class SerialTool(QMainWindow):
     #  端口
     # -------------------------------------------------------------- #
     def refresh_ports(self):
-        current = self.cmb_port.currentText()
-        ports = serial.tools.list_ports.comports()
-        items = []
+        current = self._current_port_device()
+        ports = sorted(serial.tools.list_ports.comports(), key=lambda p: p.device)
+        entries = []
+        hidden = 0
         for p in ports:
+            usable, reason = serial_port_usability(p)
+            if not usable and not self.chk_show_all_ports.isChecked():
+                hidden += 1
+                continue
             desc = p.description if p.description and p.description != "n/a" else ""
-            items.append(f"{p.device}" + (f"  ({desc})" if desc else ""))
+            suffix = f"  ({desc})" if desc else ""
+            if not usable:
+                suffix += f"  [不可用：{reason}]"
+            entries.append((f"{p.device}{suffix}", p.device, usable, reason))
+        items = [entry[0] for entry in entries]
         existing = [self.cmb_port.itemText(i) for i in range(self.cmb_port.count())]
         if items != existing:
             self.cmb_port.blockSignals(True)
             self.cmb_port.clear()
-            self.cmb_port.addItems(items)
+            for label, device, usable, reason in entries:
+                self.cmb_port.addItem(label, device)
+                index = self.cmb_port.count() - 1
+                self.cmb_port.setItemData(index, usable, Qt.UserRole + 1)
+                self.cmb_port.setItemData(index, reason, Qt.ToolTipRole)
             # 恢复之前选择
-            for i, it in enumerate(items):
-                if it.split()[0] == current.split()[0] if current else False:
+            for i, (_, device, _, _) in enumerate(entries):
+                if device == current:
                     self.cmb_port.setCurrentIndex(i)
                     break
             self.cmb_port.blockSignals(False)
+        usable_count = sum(1 for entry in entries if entry[2])
+        if not entries:
+            message = "未检测到可用串口"
+        else:
+            message = f"检测到 {usable_count} 个可用串口"
+        if hidden:
+            message += f"，已隐藏 {hidden} 个不可用端口"
+        self.status.showMessage(message, 5000)
 
     def _current_port_device(self) -> str:
+        device = self.cmb_port.currentData(Qt.UserRole)
+        if device:
+            return str(device)
         txt = self.cmb_port.currentText().strip()
         return txt.split()[0] if txt else ""
 
@@ -1227,6 +1303,11 @@ class SerialTool(QMainWindow):
         dev = self._current_port_device()
         if not dev:
             QMessageBox.warning(self, "提示", "未选择串口。")
+            self.btn_open.setChecked(False)
+            return
+        if self.cmb_port.currentData(Qt.UserRole + 1) is False:
+            reason = self.cmb_port.currentData(Qt.ToolTipRole) or "不可用"
+            QMessageBox.warning(self, "提示", f"所选串口当前不可用：{reason}")
             self.btn_open.setChecked(False)
             return
         try:
@@ -1246,7 +1327,10 @@ class SerialTool(QMainWindow):
                 write_timeout=1,
             )
         except Exception as e:
-            QMessageBox.critical(self, "打开失败", str(e))
+            self.refresh_ports()
+            QMessageBox.critical(
+                self, "打开失败",
+                f"无法打开 {dev}：{e}\n\n设备可能已被占用、刚刚断开，或当前用户没有串口权限。")
             self.btn_open.setChecked(False)
             return
 
@@ -1287,7 +1371,8 @@ class SerialTool(QMainWindow):
 
     def _set_config_enabled(self, enabled: bool):
         for w in (self.cmb_port, self.cmb_baud, self.cmb_data,
-                  self.cmb_parity, self.cmb_stop, self.btn_refresh):
+                  self.cmb_parity, self.cmb_stop, self.btn_refresh,
+                  self.chk_show_all_ports):
             w.setEnabled(enabled)
 
     def on_serial_error(self, msg):
@@ -1989,6 +2074,8 @@ class SerialTool(QMainWindow):
         self.chk_show_time.setChecked(s.value("show_time", True, type=bool))
         self.chk_autoscroll.setChecked(s.value("autoscroll", True, type=bool))
         self.chk_log_save.setChecked(s.value("log_save", False, type=bool))
+        self.chk_show_all_ports.setChecked(
+            s.value("show_all_ports", False, type=bool))
 
         theme = s.value("theme", "浅色")
         self.cmb_theme.blockSignals(True)
@@ -2072,6 +2159,7 @@ class SerialTool(QMainWindow):
         s.setValue("show_time", self.chk_show_time.isChecked())
         s.setValue("autoscroll", self.chk_autoscroll.isChecked())
         s.setValue("log_save", self.chk_log_save.isChecked())
+        s.setValue("show_all_ports", self.chk_show_all_ports.isChecked())
 
         s.setValue("auto_interval", self.spn_interval.value())
         s.setValue("auto_reply", self.chk_auto_reply.isChecked())

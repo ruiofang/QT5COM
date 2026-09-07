@@ -5,3 +5,4 @@
 *.log
 SerialDebugTool-V1.0-linux.spec
 /__pycache__
+**/__pycache__/
