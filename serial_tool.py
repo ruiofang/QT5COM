@@ -108,24 +108,21 @@ import serial.tools.list_ports
 #  工具函数
 # ------------------------------------------------------------------ #
 def _linux_uart_is_real(device: str) -> bool:
-    """Return False for the common ttyS placeholders reported as unknown UARTs."""
+    """Only accept ttyS ports bound to a dedicated, non-serial8250 driver.
+
+    Linux commonly creates ttyS0..ttyS31 through serial8250 even when no
+    usable connector exists. Opening the device is not a safe presence test,
+    so strict mode hides these ambiguous entries; users can still reveal them
+    with “显示全部”.
+    """
     name = os.path.basename(device)
     if not re.fullmatch(r"ttyS\d+", name):
         return True
+    driver = Path("/sys/class/tty") / name / "device/driver"
     try:
-        text = Path("/proc/tty/driver/serial").read_text(
-            encoding="ascii", errors="ignore")
+        return driver.exists() and driver.resolve().name != "serial8250"
     except OSError:
-        # If the kernel does not expose the table, retain an explicitly bound
-        # non-serial8250 port rather than hiding legitimate embedded hardware.
-        driver = Path("/sys/class/tty") / name / "device/driver"
-        try:
-            return driver.exists() and driver.resolve().name != "serial8250"
-        except OSError:
-            return False
-    index = name[4:]
-    match = re.search(rf"(?m)^{re.escape(index)}:\s+uart:(\S+)", text)
-    return bool(match and match.group(1).lower() != "unknown")
+        return False
 
 
 def serial_port_usability(port) -> tuple[bool, str]:
@@ -590,7 +587,7 @@ class SerialTool(QMainWindow):
         self.btn_refresh.setText("⟳")
         self.btn_refresh.setToolTip("刷新串口")
         self.btn_refresh.clicked.connect(self.refresh_ports)
-        self.chk_show_all_ports = QCheckBox("显示全部")
+        self.chk_show_all_ports = QCheckBox("显示全部（含 ttyS）")
         self.chk_show_all_ports.setToolTip(
             "显示系统枚举的全部端口，包括无权限、虚拟端口及未检测到硬件的 ttyS 端口")
         self.chk_show_all_ports.toggled.connect(self.refresh_ports)
