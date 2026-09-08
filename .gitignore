@@ -6,3 +6,4 @@
 SerialDebugTool-V1.0-linux.spec
 /__pycache__
 **/__pycache__/
+serial_tool.ini
