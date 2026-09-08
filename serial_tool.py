@@ -108,21 +108,14 @@ import serial.tools.list_ports
 #  工具函数
 # ------------------------------------------------------------------ #
 def _linux_uart_is_real(device: str) -> bool:
-    """Only accept ttyS ports bound to a dedicated, non-serial8250 driver.
+    """Hide traditional ttyS ports in strict mode.
 
-    Linux commonly creates ttyS0..ttyS31 through serial8250 even when no
-    usable connector exists. Opening the device is not a safe presence test,
-    so strict mode hides these ambiguous entries; users can still reveal them
-    with “显示全部”.
+    Linux can report a ttyS port as a bound UART even though configuring it
+    returns EIO. Presence cannot be verified without opening the port, which
+    may toggle control lines, so strict mode treats every ttyS as ambiguous.
     """
     name = os.path.basename(device)
-    if not re.fullmatch(r"ttyS\d+", name):
-        return True
-    driver = Path("/sys/class/tty") / name / "device/driver"
-    try:
-        return driver.exists() and driver.resolve().name != "serial8250"
-    except OSError:
-        return False
+    return not bool(re.fullmatch(r"ttyS\d+", name))
 
 
 def serial_port_usability(port) -> tuple[bool, str]:
@@ -546,6 +539,7 @@ class SerialTool(QMainWindow):
         self.modbus_rx_buffer = bytearray()
         self.modbus_entries = []
         self.modbus_table_context = None
+        self.failed_ports = set()
         self.modbus_timeout = QTimer(self)
         self.modbus_timeout.setSingleShot(True)
         self.modbus_timeout.timeout.connect(self._on_modbus_timeout)
@@ -1254,6 +1248,8 @@ class SerialTool(QMainWindow):
         hidden = 0
         for p in ports:
             usable, reason = serial_port_usability(p)
+            if p.device in self.failed_ports:
+                usable, reason = False, "本次运行打开失败"
             if not usable and not self.chk_show_all_ports.isChecked():
                 hidden += 1
                 continue
@@ -1328,6 +1324,7 @@ class SerialTool(QMainWindow):
                 write_timeout=1,
             )
         except Exception as e:
+            self.failed_ports.add(dev)
             self.refresh_ports()
             QMessageBox.critical(
                 self, "打开失败",

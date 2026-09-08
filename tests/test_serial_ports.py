@@ -82,6 +82,28 @@ class SerialPortTests(unittest.TestCase):
             self.assertEqual(m.serial_port_usability(candidate),
                              (False, "内核未检测到 UART 硬件"))
 
+    def test_all_traditional_ttys_are_ambiguous(self):
+        for index in (0, 1, 31, 99):
+            self.assertFalse(m._linux_uart_is_real(f"/dev/ttyS{index}"))
+        self.assertTrue(m._linux_uart_is_real("/dev/ttyUSB0"))
+        self.assertTrue(m._linux_uart_is_real("/dev/ttyACM0"))
+
+    def test_open_failure_removes_port_for_current_run(self):
+        ports = [port("/dev/good0")]
+        tmp, window = self.make_window(ports)
+        try:
+            with patch.object(m.serial, "Serial", side_effect=OSError(5, "I/O error")), \
+                 patch.object(m.QMessageBox, "critical"), \
+                 patch.object(m.serial.tools.list_ports, "comports", return_value=ports), \
+                 patch.object(m, "serial_port_usability", return_value=(True, "可用")):
+                window.open_port()
+            self.assertIn("/dev/good0", window.failed_ports)
+            self.assertEqual(window.cmb_port.count(), 0)
+            self.assertIn("未检测到可用串口", window.status.currentMessage())
+        finally:
+            window.close()
+            tmp.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()
