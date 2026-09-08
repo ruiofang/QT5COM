@@ -2,6 +2,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import tempfile
+import pty
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -82,11 +83,42 @@ class SerialPortTests(unittest.TestCase):
             self.assertEqual(m.serial_port_usability(candidate),
                              (False, "内核未检测到 UART 硬件"))
 
-    def test_all_traditional_ttys_are_ambiguous(self):
-        for index in (0, 1, 31, 99):
-            self.assertFalse(m._linux_uart_is_real(f"/dev/ttyS{index}"))
+    def test_kernel_uart_detection_keeps_real_ttys(self):
+        table = "0: uart:16550A port:000003F8 irq:4\n1: uart:unknown port:00000000 irq:0\n"
+        with patch.object(m.Path, "read_text", return_value=table):
+            self.assertTrue(m._linux_uart_is_real("/dev/ttyS0"))
+            self.assertFalse(m._linux_uart_is_real("/dev/ttyS1"))
+            self.assertFalse(m._linux_uart_is_real("/dev/ttyS31"))
         self.assertTrue(m._linux_uart_is_real("/dev/ttyUSB0"))
         self.assertTrue(m._linux_uart_is_real("/dev/ttyACM0"))
+
+    def test_termios_probe_accepts_a_configurable_terminal(self):
+        master, slave = pty.openpty()
+        try:
+            self.assertEqual(m._probe_linux_tty(os.ttyname(slave)), (True, "可用"))
+        finally:
+            os.close(master)
+            os.close(slave)
+        usable, reason = m._probe_linux_tty("/definitely/not/a/tty")
+        self.assertFalse(usable)
+        self.assertIn("探测失败", reason)
+
+    def test_real_ttys_must_also_pass_configuration_probe(self):
+        candidate = port("/dev/ttyS0")
+        common = [patch.object(m.sys, "platform", "linux"),
+                  patch.object(m.os.path, "exists", return_value=True),
+                  patch.object(m.os, "access", return_value=True),
+                  patch.object(m, "_linux_uart_is_real", return_value=True)]
+        with common[0], common[1], common[2], common[3], \
+             patch.object(m, "_probe_linux_tty", return_value=(True, "可用")):
+            self.assertEqual(m.serial_port_usability(candidate), (True, "可用"))
+        with patch.object(m.sys, "platform", "linux"), \
+             patch.object(m.os.path, "exists", return_value=True), \
+             patch.object(m.os, "access", return_value=True), \
+             patch.object(m, "_linux_uart_is_real", return_value=True), \
+             patch.object(m, "_probe_linux_tty", return_value=(False, "端口配置探测失败：I/O error")):
+            self.assertEqual(m.serial_port_usability(candidate),
+                             (False, "端口配置探测失败：I/O error"))
 
     def test_open_failure_removes_port_for_current_run(self):
         ports = [port("/dev/good0")]

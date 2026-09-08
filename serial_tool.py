@@ -108,14 +108,39 @@ import serial.tools.list_ports
 #  工具函数
 # ------------------------------------------------------------------ #
 def _linux_uart_is_real(device: str) -> bool:
-    """Hide traditional ttyS ports in strict mode.
-
-    Linux can report a ttyS port as a bound UART even though configuring it
-    returns EIO. Presence cannot be verified without opening the port, which
-    may toggle control lines, so strict mode treats every ttyS as ambiguous.
-    """
+    """Check whether the kernel reports actual UART hardware for ttyS."""
     name = os.path.basename(device)
-    return not bool(re.fullmatch(r"ttyS\d+", name))
+    if not re.fullmatch(r"ttyS\d+", name):
+        return True
+    try:
+        text = Path("/proc/tty/driver/serial").read_text(
+            encoding="ascii", errors="ignore")
+    except OSError:
+        return False
+    index = name[4:]
+    match = re.search(rf"(?m)^{re.escape(index)}:\s+uart:(\S+)", text)
+    return bool(match and match.group(1).lower() != "unknown")
+
+
+def _probe_linux_tty(device: str) -> tuple[bool, str]:
+    """Verify that a tty can accept its current termios settings.
+
+    This catches legacy ttyS nodes which the kernel advertises as a UART but
+    which fail with EIO when pyserial tries to configure them. The existing
+    settings are written back unchanged; no application data is sent.
+    """
+    try:
+        import termios
+        flags = os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK
+        fd = os.open(device, flags)
+        try:
+            attrs = termios.tcgetattr(fd)
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        return False, f"端口配置探测失败：{exc.strerror or exc}"
+    return True, "可用"
 
 
 def serial_port_usability(port) -> tuple[bool, str]:
@@ -131,8 +156,12 @@ def serial_port_usability(port) -> tuple[bool, str]:
         name = os.path.basename(device)
         if name in ("tty", "ttyprintk") or name.startswith(("pts", "ptmx")):
             return False, "系统虚拟终端"
-        if not _linux_uart_is_real(device):
-            return False, "内核未检测到 UART 硬件"
+        if re.fullmatch(r"ttyS\d+", name):
+            if not _linux_uart_is_real(device):
+                return False, "内核未检测到 UART 硬件"
+            usable, reason = _probe_linux_tty(device)
+            if not usable:
+                return False, reason
     elif sys.platform == "darwin":
         # macOS exposes tty.* and cu.* pairs; cu.* is intended for initiating
         # outgoing serial connections and avoids duplicate devices.
@@ -581,7 +610,7 @@ class SerialTool(QMainWindow):
         self.btn_refresh.setText("⟳")
         self.btn_refresh.setToolTip("刷新串口")
         self.btn_refresh.clicked.connect(self.refresh_ports)
-        self.chk_show_all_ports = QCheckBox("显示全部（含 ttyS）")
+        self.chk_show_all_ports = QCheckBox("显示全部（含不可用 ttyS）")
         self.chk_show_all_ports.setToolTip(
             "显示系统枚举的全部端口，包括无权限、虚拟端口及未检测到硬件的 ttyS 端口")
         self.chk_show_all_ports.toggled.connect(self.refresh_ports)
