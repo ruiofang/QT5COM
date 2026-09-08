@@ -136,6 +136,31 @@ class SerialPortTests(unittest.TestCase):
             window.close()
             tmp.cleanup()
 
+    @unittest.skipUnless(os.name == "posix", "POSIX exclusive serial test")
+    def test_same_port_cannot_be_opened_twice(self):
+        master, slave = pty.openpty()
+        device = os.ttyname(slave)
+        first = None
+        try:
+            first = m.open_serial_connection(port=device, timeout=0)
+            with self.assertRaises(m.serial.SerialException):
+                m.open_serial_connection(port=device, timeout=0)
+        finally:
+            if first is not None:
+                first.close()
+            os.close(master)
+            os.close(slave)
+
+    def test_exclusive_flag_is_used_only_on_posix(self):
+        with patch.object(m.os, "name", "posix"), \
+             patch.object(m.serial, "Serial", return_value="opened") as serial_open:
+            self.assertEqual(m.open_serial_connection(port="test"), "opened")
+            self.assertTrue(serial_open.call_args.kwargs["exclusive"])
+        with patch.object(m.os, "name", "nt"), \
+             patch.object(m.serial, "Serial", return_value="opened") as serial_open:
+            m.open_serial_connection(port="COM1")
+            self.assertNotIn("exclusive", serial_open.call_args.kwargs)
+
 
 if __name__ == "__main__":
     unittest.main()

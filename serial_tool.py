@@ -172,6 +172,13 @@ def serial_port_usability(port) -> tuple[bool, str]:
     return True, "可用"
 
 
+def open_serial_connection(**kwargs) -> serial.Serial:
+    """Open one port exclusively while allowing independent app instances."""
+    if os.name == "posix":
+        kwargs["exclusive"] = True
+    return serial.Serial(**kwargs)
+
+
 def hex_str_to_bytes(text: str) -> bytes:
     """将 '01 A2 FF' 或 '01A2FF' 形式的字符串转为 bytes。"""
     clean = "".join(ch for ch in text if ch in "0123456789abcdefABCDEF")
@@ -1343,7 +1350,7 @@ class SerialTool(QMainWindow):
             self.btn_open.setChecked(False)
             return
         try:
-            self.ser = serial.Serial(
+            self.ser = open_serial_connection(
                 port=dev,
                 baudrate=baud,
                 bytesize=int(self.cmb_data.currentText()),
