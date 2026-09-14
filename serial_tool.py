@@ -503,6 +503,8 @@ def parse_binary_mbp_profile(data: bytes) -> dict | None:
 class SerialReader(QThread):
     data_received = pyqtSignal(bytes)
     error = pyqtSignal(str)
+    FLUSH_INTERVAL = 0.020
+    MAX_CHUNK_BYTES = 4096
 
     def __init__(self, ser: serial.Serial, parent=None):
         super().__init__(parent)
@@ -511,19 +513,21 @@ class SerialReader(QThread):
 
     def run(self):
         buf = bytearray()
-        last_t = time.time()
+        last_flush = time.monotonic()
         while self._running:
             try:
                 n = self.ser.in_waiting
                 if n:
-                    chunk = self.ser.read(n)
+                    chunk = self.ser.read(min(n, self.MAX_CHUNK_BYTES - len(buf)))
                     buf.extend(chunk)
-                    last_t = time.time()
-                else:
-                    # 超过 20ms 没新数据就打包发出
-                    if buf and (time.time() - last_t) * 1000 > 20:
-                        self.data_received.emit(bytes(buf))
-                        buf.clear()
+                # 连续输入也必须交付，不能依赖串口出现空闲间隙。
+                now = time.monotonic()
+                if buf and (len(buf) >= self.MAX_CHUNK_BYTES or
+                            now - last_flush >= self.FLUSH_INTERVAL):
+                    self.data_received.emit(bytes(buf))
+                    buf.clear()
+                    last_flush = now
+                if not n:
                     self.msleep(5)
             except Exception as e:
                 self.error.emit(str(e))
@@ -556,6 +560,8 @@ class SerialTool(QMainWindow):
         "2":   serial.STOPBITS_TWO,
     }
     MAX_HISTORY = 30
+    MAX_DISPLAY_BLOCKS = 2000
+    MAX_DISPLAY_CHARS = 512 * 1024
 
     def __init__(self):
         super().__init__()
@@ -789,10 +795,13 @@ class SerialTool(QMainWindow):
         av.addLayout(btn_row)
 
         # ============ 接收区 ============
-        self.recv_edit = QTextEdit()
+        self.recv_edit = QPlainTextEdit()
         self.recv_edit.setReadOnly(True)
         self.recv_edit.setFont(QFont("Consolas", 10))
-        self.recv_edit.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.recv_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.recv_edit.setUndoRedoEnabled(False)
+        self.recv_edit.setMaximumBlockCount(self.MAX_DISPLAY_BLOCKS)
+        self.recv_edit.setToolTip("显示最近 2000 行，最多 512K 字符；完整数据请启用日志保存。")
 
         # ============ 总体布局 ============
         left = QWidget()
@@ -1482,13 +1491,24 @@ class SerialTool(QMainWindow):
             self._check_auto_reply(data)
 
     def append_log(self, text: str, color: str = "#202020"):
+        # 行数和字符数同时限制，避免无换行的大包使文档无限增长。
+        text = (text + "\n")[-self.MAX_DISPLAY_CHARS:]
+        scroll = self.recv_edit.verticalScrollBar()
+        old_scroll = scroll.value()
         cursor = self.recv_edit.textCursor()
+        excess = self.recv_edit.document().characterCount() - 1 + len(text) - self.MAX_DISPLAY_CHARS
+        if excess > 0:
+            cursor.movePosition(QTextCursor.Start)
+            cursor.movePosition(QTextCursor.NextCharacter, QTextCursor.KeepAnchor, excess)
+            cursor.removeSelectedText()
         cursor.movePosition(QTextCursor.End)
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(color))
-        cursor.insertText(text + "\n", fmt)
+        cursor.insertText(text, fmt)
         if self.chk_autoscroll.isChecked():
             self.recv_edit.moveCursor(QTextCursor.End)
+        else:
+            scroll.setValue(old_scroll)
 
     # -------------------------------------------------------------- #
     #  发送
