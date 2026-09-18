@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Serial Debug Tool (PyQt5)
-Version: V1.0.1
+Version: V1.0.2
 Author : RUIO
 License: MIT
 Features:
@@ -15,7 +15,7 @@ Features:
   7. 配置文件 (程序同目录 ini) 保存上次设置与历史发送
 """
 
-__version__ = "V1.0.1"
+__version__ = "V1.0.2"
 __author__ = "RUIO"
 
 import os
@@ -26,6 +26,16 @@ import datetime
 import struct
 import re
 from pathlib import Path
+
+
+# Direct source launches use the project's installed environment, including
+# launches from an editor that still selects the base Python interpreter.
+if __name__ == "__main__" and not getattr(sys, "frozen", False):
+    _project_venv = Path(__file__).resolve().parent / ".venv"
+    _project_python = _project_venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if _project_python.is_file() and Path(sys.prefix).resolve() != _project_venv.resolve():
+        os.execv(str(_project_python),
+                 [str(_project_python), str(Path(__file__).resolve()), *sys.argv[1:]])
 
 
 def app_dir() -> str:
@@ -102,6 +112,8 @@ from PyQt5.QtWidgets import (
 
 import serial
 import serial.tools.list_ports
+from ssh_panel import SSHPanel
+from serial_terminal import SerialTerminalPanel
 
 
 # ------------------------------------------------------------------ #
@@ -828,6 +840,10 @@ class SerialTool(QMainWindow):
         tab.addTab(auto_box, "自动回复")
         tab.addTab(self._build_quick_tab(), "快捷按钮")
         tab.addTab(self._build_modbus_tab(), "Modbus")
+        self.serial_terminal = SerialTerminalPanel(self._send_terminal_data, self.btn_open.click)
+        tab.addTab(self.serial_terminal, "串口终端")
+        self.ssh_panel = SSHPanel(self.settings)
+        tab.addTab(self.ssh_panel, "SSH（网络）")
         bv.addWidget(tab)
         right_split.addWidget(bottom)
         right_split.setStretchFactor(0, 3)
@@ -835,12 +851,19 @@ class SerialTool(QMainWindow):
         normal_split_sizes = []
 
         def resize_for_modbus(index):
-            if tab.tabText(index) == "Modbus":
-                normal_split_sizes[:] = right_split.sizes()
+            self.serial_terminal.output.responses_enabled = tab.widget(index) is self.serial_terminal
+            if tab.tabText(index) in ("Modbus", "串口终端", "SSH（网络）"):
+                if not normal_split_sizes:
+                    normal_split_sizes[:] = right_split.sizes()
                 right_split.setSizes([100, max(500, right_split.height() - 100)])
             elif normal_split_sizes:
                 right_split.setSizes(normal_split_sizes)
                 normal_split_sizes.clear()
+            if tab.widget(index) is self.serial_terminal:
+                self.chk_auto_send.setChecked(False)
+                self.chk_auto_reply.setChecked(False)
+                self.chk_modbus_poll.setChecked(False)
+                self.serial_terminal.output.setFocus()
 
         tab.currentChanged.connect(resize_for_modbus)
 
@@ -1388,6 +1411,7 @@ class SerialTool(QMainWindow):
             f"{self.cmb_parity.currentText()[0]}{self.cmb_stop.currentText()}"
         )
         self._set_config_enabled(False)
+        self.serial_terminal.set_connected(True, f"{dev} @ {baud}")
 
         if self.chk_log_save.isChecked():
             self._open_log_file()
@@ -1406,6 +1430,7 @@ class SerialTool(QMainWindow):
             except Exception:
                 pass
         self.ser = None
+        self.serial_terminal.set_connected(False)
         self.btn_open.setText("打开串口")
         self.btn_open.setChecked(False)
         self.lbl_state.setText("未连接")
@@ -1468,6 +1493,7 @@ class SerialTool(QMainWindow):
     #  接收
     # -------------------------------------------------------------- #
     def on_data_received(self, data: bytes):
+        self.serial_terminal.output.feed(data)
         self.rx_bytes += len(data)
         self._update_counter()
 
@@ -1489,6 +1515,25 @@ class SerialTool(QMainWindow):
         # 自动回复
         if self.chk_auto_reply.isChecked():
             self._check_auto_reply(data)
+
+    def _send_terminal_data(self, data: bytes, sensitive: bool = False) -> bool:
+        if not (self.ser and self.ser.is_open):
+            self.serial_terminal.output.append_notice("[请先打开串口]")
+            return False
+        try:
+            # Console input bypasses HEX mode and checksums used by device protocols.
+            written = self.ser.write(data)
+            self.tx_bytes += written
+            self._update_counter()
+            if written != len(data):
+                raise IOError(f"仅发送 {written}/{len(data)} 字节，请检查设备")
+        except Exception as exc:
+            self.serial_terminal.output.append_notice(f"[发送失败] {exc}")
+            return False
+        shown = f"[终端输入 {len(data)} 字节，内容未记录]" if sensitive else repr(data.decode('utf-8', errors='replace'))
+        self.append_log(f"[{now_ms()}] >> (终端) {shown}", color="#0d47a1")
+        self._write_log_raw(f"{datetime.datetime.now().isoformat(timespec='milliseconds')} TX(terminal) -> {shown}\n")
+        return True
 
     def append_log(self, text: str, color: str = "#202020"):
         # 行数和字符数同时限制，避免无换行的大包使文档无限增长。
@@ -2202,6 +2247,7 @@ class SerialTool(QMainWindow):
 
     def _save_settings(self):
         s = self.settings
+        self.ssh_panel.save_settings()
         s.setValue("baud", self.cmb_baud.currentText())
         s.setValue("data", self.cmb_data.currentText())
         s.setValue("parity", self.cmb_parity.currentText())
@@ -2260,6 +2306,14 @@ class SerialTool(QMainWindow):
 
     # -------------------------------------------------------------- #
     def closeEvent(self, ev):
+        if self.ssh_panel.worker is not None:
+            self.ssh_panel.worker.stop()
+            if not getattr(self, '_ssh_closing', False):
+                self._ssh_closing = True
+                self.ssh_panel.disconnected.connect(self.close)
+            self.ssh_panel.status.setText("正在关闭 SSH，请稍候…")
+            ev.ignore()
+            return
         try:
             self._save_settings()
         finally:

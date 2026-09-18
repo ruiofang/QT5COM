@@ -1,8 +1,8 @@
 # Serial Debug Tool
 
-一个基于 **Python 3 + PyQt5 + pyserial** 的跨平台串口调试工具，单文件即可运行，打包后为便携式可执行程序。
+一个基于 **Python 3 + PyQt5 + pyserial + Paramiko** 的跨平台串口与 SSH 调试工具，打包后为便携式可执行程序。
 
-- **版本**：V1.0.1
+- **版本**：V1.0.2
 - **作者**：RUIO
 - **协议**：MIT License
 
@@ -36,9 +36,34 @@
 需要 Python 3.10 或更高版本。
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 python3 serial_tool.py
 ```
+
+直接运行 `serial_tool.py` 时会自动使用项目 `.venv`（若存在），无需先激活环境；编辑器选择其他 Python 也可启动。Windows 安装依赖时使用 `.venv\Scripts\python.exe`。
+
+### 串口终端（USB / UART，无需 IP）
+
+1. 左侧选择设备（如 `/dev/ttyUSB0`），按设备要求设置波特率及帧格式（常见 `115200 / 8N1`），打开串口。
+2. 切到 **串口终端**，点击终端区域直接按 **Enter**，等待设备出现 `login:` 或 shell 提示符。
+3. 按提示直接输入用户名、密码并回车。字符实时发送，由设备决定是否回显；本地不记录终端发送内容或输入历史，若设备主动回显密码，回显仍属于接收数据。
+4. 登录后直接输入 Linux 命令；**Tab** 补全、**↑/↓** 远端历史、**Ctrl+C** 中断、**Ctrl+Shift+C/V** 复制/粘贴。Enter 默认 CR，可切换 LF/CRLF；退格默认 DEL，可改为 BS。单次粘贴限 4096 字节。
+
+串口终端与 SSH 共用 ANSI/VT 终端显示，支持颜色、光标定位、清屏、备用屏幕及 2000 行滚动历史，可显示 `top` 等终端界面。共用左侧已打开的串口，不需要 IP 或 SSH 服务；设备必须提供串口控制台。串口不能自动同步远端尺寸，可点击 **复制尺寸命令**，登录 Linux 后按需粘贴执行 `export TERM=xterm-256color; stty cols … rows …`。该按钮只复制，不自动发送命令。
+
+进入串口终端会停止循环发送、自动回复及 Modbus 自动读取；仅在此页激活时响应设备的终端查询。发送不附加 HEX 转换或校验和。原接收区、计数和文件日志仍可使用，终端发送日志只记录字节数；断开后保留最后的屏幕供排查。
+
+### SSH 命令终端（网络连接，需要 IP）
+
+- 切换到 **SSH（网络）** 标签页，填写主机 IP / 域名、端口（默认 22）、用户名和密码，点击 **连接 SSH**。SSH 与串口可以同时连接，收发区互相独立。
+- 可选择私钥文件；此时密码框用于输入私钥口令。密码及口令不写入配置文件。留空密码及私钥时，尝试默认密钥或 SSH Agent。
+- 首次连接显示服务器 SHA256 指纹，核对后确认信任，保存到配置目录的 `ssh_known_hosts`；也读取系统用户的 SSH 已知主机记录。已知主机密钥变化会拒绝连接。
+- 连接后点击终端区域直接输入，**Enter** 执行、**Tab** 补全、**↑/↓** 调出远端 shell 历史、**Ctrl+C** 中断、**Ctrl+D** 发送 EOF。字符直接发送到远端，是否回显由远端控制，兼容密码提示及中文输入法提交。
+- 支持 ANSI/VT 光标定位、清屏、颜色、备用屏幕和窗口尺寸同步，可交互运行 `top` 等终端程序。使用 `xterm-256color` PTY；暂不支持鼠标上报和图形协议。SSH 输出不进入串口日志、自动回复或 Modbus 解析。
+- 鼠标拖选文本后 **Ctrl+Shift+C** 复制，**Ctrl+Shift+V** 或右键菜单粘贴；支持远端启用的 bracketed paste。滚轮或 **Shift+PageUp/PageDown** 查看历史，输入时回到当前屏幕。
+- 保留最多 2000 行滚动历史，显示网格最大 240 列、120 行；连接、收发在后台执行。断开后可重新连接，关闭窗口会先结束 SSH 会话。
+- 源码运行需保留项目的全部 `.py` 文件，依赖安装见上方源码运行步骤。现有旧版可执行文件需要重新打包才包含新功能。
 
 ### 发送历史管理
 
@@ -98,7 +123,7 @@ sudo usermod -aG dialout $USER     # 重新登录生效
 
 ### 打包为单文件可执行程序
 ```bash
-python3 build.py            # 产物: dist/SerialDebugTool-V1.0.1[.exe|-linux]
+python3 build.py            # 产物: dist/SerialDebugTool-V1.0.2[.exe|-linux]
 python3 build.py --clean    # 清理构建产物
 ```
 - 打包前会自动调用 `gen_icon.py` 生成 `app.png` / `app.ico`（已存在则跳过）。
@@ -136,7 +161,7 @@ python3 gen_icon.py           # 重新生成 app.png / app.ico
 ## 📂 运行期目录结构
 ```
 程序目录/
-├── SerialDebugTool-V1.0.1-linux  # Linux 可执行文件；Windows 为 SerialDebugTool-V1.0.1.exe
+├── SerialDebugTool-V1.0.2-linux  # Linux 可执行文件；Windows 为 SerialDebugTool-V1.0.2.exe
 ├── serial_tool.ini           # 便携配置
 └── logs/
     └── 2026-04-18.log        # 按日期归档日志
@@ -152,6 +177,12 @@ python3 gen_icon.py           # 重新生成 app.png / app.ico
 ---
 
 ## 更新记录
+
+### V1.0.2
+
+- 新增独立 SSH 交互终端，支持密码/私钥登录、主机指纹确认、直接键盘输入和窗口尺寸同步。
+- 新增串口交互终端，支持 ANSI/VT 显示、方向键、Tab、Ctrl+C、复制粘贴以及换行与退格配置。
+- 源码启动时自动使用项目 `.venv`，避免解释器与依赖环境不一致。
 
 ### 2026-09-14 连续高速接收修复
 

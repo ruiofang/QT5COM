@@ -7,7 +7,7 @@
     python3 build.py --clean    # 清理 build/dist/*.spec
 
 依赖:
-    pip install pyinstaller pyqt5 pyserial
+    pip install pyinstaller -r requirements.txt
 """
 import argparse
 import os
@@ -27,7 +27,7 @@ def read_meta():
     text = ENTRY.read_text(encoding="utf-8")
     m_ver = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
     m_auth = re.search(r'__author__\s*=\s*["\']([^"\']+)["\']', text)
-    return (m_ver.group(1) if m_ver else "V1.0.1",
+    return (m_ver.group(1) if m_ver else "V1.0.2",
             m_auth.group(1) if m_auth else "RUIO")
 
 
@@ -111,11 +111,14 @@ def ensure_icon():
 
 def build():
     ensure_pyinstaller()
+    # Fail explicitly instead of silently packaging an application without SSH.
+    import paramiko  # noqa: F401
+    import pyte  # noqa: F401
     ensure_icon()
     version, author = read_meta()
     is_win = sys.platform.startswith("win")
 
-    # 产物名包含版本号，如 SerialDebugTool-V1.0.1.exe / SerialDebugTool-V1.0.1-linux
+    # 产物名包含版本号，如 SerialDebugTool-V1.0.2.exe / SerialDebugTool-V1.0.2-linux
     plat_suffix = "" if is_win else f"-{sys.platform}"
     name = f"{APP_NAME}-{version}{plat_suffix}"
 
