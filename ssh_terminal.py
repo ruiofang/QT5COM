@@ -98,6 +98,7 @@ class SSHTerminal(QAbstractScrollArea):
         self.cell_height = max(1, math.ceil(metrics.height() * 1.12))
         self.ascent = metrics.ascent()
         self.connected = False
+        self.waiting_for_output = True
         self.preedit = ''
         self.preedit_cursor = 0
         self.preedit_cursor_visible = True
@@ -140,9 +141,21 @@ class SSHTerminal(QAbstractScrollArea):
         self._stop_selection_drag()
         self._cancel_preedit()
         self.decoder.reset()
+        self.waiting_for_output = True
         self.screen = TerminalScreen(self.screen.columns, self.screen.lines, self._reply)
         self.stream = pyte.Stream(self.screen)
         self.selection = None
+        self._refresh()
+
+    def resume_stream(self):
+        # Discard incomplete UTF-8/escape sequences across a disconnect while
+        # preserving the screen, history and terminal modes for this device.
+        self._stop_selection_drag()
+        self._cancel_preedit()
+        self.decoder.reset()
+        self.stream = pyte.Stream(self.screen)
+        self.selection = None
+        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
         self._refresh()
 
     def clear(self):
@@ -156,6 +169,8 @@ class SSHTerminal(QAbstractScrollArea):
         self._refresh()
 
     def append_output(self, text):
+        if text:
+            self.waiting_for_output = False
         self.stream.feed(text)
         self._refresh()
 
@@ -250,6 +265,11 @@ class SSHTerminal(QAbstractScrollArea):
                     painter.setPen(fg)
                     painter.drawText(rect.x(), rect.y() + self.ascent, char.data)
                 x += width
+        if self.connected and self.waiting_for_output:
+            painter.setPen(QColor('#abb2bf'))
+            painter.drawText(self.viewport().rect().adjusted(12, 32, -12, -12),
+                             Qt.AlignTop | Qt.TextWordWrap,
+                             '等待设备输出。Linux shell 可按 Ctrl+L 刷新提示符。')
         at_bottom = offset == self.verticalScrollBar().maximum()
         if self.preedit and at_bottom:
             rect = self._cursor_rect(include_preedit=False)

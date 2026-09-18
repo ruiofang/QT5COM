@@ -8,6 +8,7 @@ class SerialTerminalPanel(QWidget):
     def __init__(self, send, toggle_port, parent=None):
         super().__init__(parent)
         self.send = send
+        self._session_description = None
         layout = QVBoxLayout(self)
         row = QHBoxLayout()
         self.status = QLabel()
@@ -44,6 +45,9 @@ class SerialTerminalPanel(QWidget):
         self.sync_size_button.setMenu(size_menu)
         self.interrupt_button = QPushButton('Ctrl+C')
         self.interrupt_button.clicked.connect(lambda: self.send_input(b'\x03'))
+        self.refresh_prompt_button = QPushButton('刷新提示符')
+        self.refresh_prompt_button.setToolTip('发送 Ctrl+L，让 Linux shell 重绘当前命令行；不会发送 Enter。非终端设备请勿使用。')
+        self.refresh_prompt_button.clicked.connect(self.refresh_prompt)
         row.addWidget(QLabel('Enter'))
         row.addWidget(self.newline)
         row.addWidget(QLabel('退格'))
@@ -51,6 +55,7 @@ class SerialTerminalPanel(QWidget):
         row.addStretch()
         row.addWidget(self.dimensions)
         row.addWidget(self.sync_size_button)
+        row.addWidget(self.refresh_prompt_button)
         row.addWidget(self.interrupt_button)
         layout.addLayout(row)
         hint = QLabel('点击终端直接输入；Enter 登录/执行 · Tab 补全 · ↑↓ 历史 · Ctrl+C 中断 · Ctrl+Shift+C/V 复制/粘贴。\n'
@@ -81,14 +86,25 @@ class SerialTerminalPanel(QWidget):
         QApplication.clipboard().setText(self.size_command())
         self.output.setFocus()
 
+    def refresh_prompt(self):
+        self.send_input(b'\x0c')
+        self.output.setFocus()
+
     def set_connected(self, connected, description=''):
         self.status.setText(('已连接 ' + description) if connected else '未连接：请在左侧设置串口并打开。无需 IP。')
         self.open_button.setText('关闭串口' if connected else '打开串口')
         self.output.set_connected(connected)
         self.interrupt_button.setEnabled(connected)
         self.sync_size_button.setEnabled(connected)
+        self.refresh_prompt_button.setEnabled(connected)
         if connected:
-            self.output.reset_stream()
+            # Reopening a serial port does not make a shell resend its prompt.
+            # Keep the last screen for the same device, but never mix devices.
+            if description != self._session_description:
+                self.output.reset_stream()
+            else:
+                self.output.resume_stream()
+            self._session_description = description
             self.output.setFocus()
         else:
             # Keep the final screen available for diagnosis after disconnect.

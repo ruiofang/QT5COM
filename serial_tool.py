@@ -1438,7 +1438,6 @@ class SerialTool(QMainWindow):
         self.reader = SerialReader(self.ser)
         self.reader.data_received.connect(self.on_data_received)
         self.reader.error.connect(self.on_serial_error)
-        self.reader.start()
 
         self.btn_open.setText("关闭串口")
         self.lbl_state.setText(
@@ -1450,6 +1449,8 @@ class SerialTool(QMainWindow):
 
         if self.chk_log_save.isChecked():
             self._open_log_file()
+        # Finish terminal initialization before any first receive is delivered.
+        self.reader.start()
 
     def close_port(self):
         self.chk_modbus_poll.setChecked(False)

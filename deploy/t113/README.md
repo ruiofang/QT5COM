@@ -13,10 +13,13 @@ systemctl start qt5com   # 在设备屏幕打开
 systemctl stop qt5com    # 关闭
 systemctl status qt5com --no-pager
 journalctl -u qt5com -n 30 --no-pager
+systemctl enable qt5com # 启用开机自启
+systemctl disable qt5com # 取消开机自启，不停止当前程序
 ```
 
 也可以在服务停止后前台运行 `/mnt/UDISK/qt5com/bin/qt5com`。
-服务默认不设为开机自启。没有安装完整桌面或中文输入法；中文显示已验证，
+2026-09-18 更新为 V1.0.2 最新源码并启用开机自启。服务等待部署目录挂载后启动，
+异常退出后间隔 5 秒重试，60 秒内最多启动 3 次。没有安装完整桌面或中文输入法；中文显示已验证，
 键盘输入需要 USB 键盘，触摸屏本身不提供软键盘。
 
 ## 环境及布局
