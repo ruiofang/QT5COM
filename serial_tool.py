@@ -15,6 +15,8 @@ Features:
   7. 配置文件 (程序同目录 ini) 保存上次设置与历史发送
 """
 
+from __future__ import annotations
+
 __version__ = "V1.0.2"
 __author__ = "RUIO"
 
@@ -128,14 +130,34 @@ def _linux_uart_is_real(device: str) -> bool:
     name = os.path.basename(device)
     if not re.fullmatch(r"ttyS\d+", name):
         return True
-    try:
-        text = Path("/proc/tty/driver/serial").read_text(
-            encoding="ascii", errors="ignore")
-    except OSError:
-        return False
     index = name[4:]
-    match = re.search(rf"(?m)^{re.escape(index)}:\s+uart:(\S+)", text)
-    return bool(match and match.group(1).lower() != "unknown")
+    # Allwinner's vendor kernel reports its UARTs under "uart", while
+    # desktop 8250 drivers use "serial".
+    for report in ("serial", "uart"):
+        try:
+            text = Path(f"/proc/tty/driver/{report}").read_text(
+                encoding="ascii", errors="ignore")
+        except OSError:
+            continue
+        match = re.search(rf"(?m)^{re.escape(index)}:\s+uart:(\S+)", text)
+        if match and match.group(1).lower() != "unknown":
+            return True
+    return False
+
+
+def enumerate_serial_ports():
+    ports = {p.device: p for p in serial.tools.list_ports.comports()}
+    if sys.platform.startswith("linux"):
+        # pyserial excludes the platform subsystem, including real SUNXI
+        # UARTs. Only add nodes confirmed by the kernel hardware report.
+        from serial.tools.list_ports_common import ListPortInfo
+        for node in Path("/dev").glob("ttyS*"):
+            device = str(node)
+            if device not in ports and _linux_uart_is_real(device):
+                port = ListPortInfo(device)
+                port.description = "板载 UART"
+                ports[device] = port
+    return sorted(ports.values(), key=lambda p: p.device)
 
 
 def _probe_linux_tty(device: str) -> tuple[bool, str]:
@@ -173,6 +195,12 @@ def serial_port_usability(port) -> tuple[bool, str]:
         if name in ("tty", "ttyprintk") or name.startswith(("pts", "ptmx")):
             return False, "系统虚拟终端"
         if re.fullmatch(r"ttyS\d+", name):
+            try:
+                consoles = Path("/sys/class/tty/console/active").read_text().split()
+            except OSError:
+                consoles = []
+            if name in consoles:
+                return False, "系统控制台正在使用"
             if not _linux_uart_is_real(device):
                 return False, "内核未检测到 UART 硬件"
             usable, reason = _probe_linux_tty(device)
@@ -871,12 +899,15 @@ class SerialTool(QMainWindow):
 
         tab.currentChanged.connect(resize_for_modbus)
 
-        main_split = QSplitter(Qt.Horizontal)
+        # Small embedded displays often use portrait orientation. Keep the
+        # desktop layout unchanged unless the device launcher opts in.
+        portrait = os.environ.get("QT5COM_PORTRAIT") == "1"
+        main_split = QSplitter(Qt.Vertical if portrait else Qt.Horizontal)
         main_split.addWidget(left)
         main_split.addWidget(right_split)
         main_split.setStretchFactor(0, 0)
         main_split.setStretchFactor(1, 1)
-        main_split.setSizes([270, 780])
+        main_split.setSizes([450, 800] if portrait else [270, 780])
 
         outer = QVBoxLayout(central)
         outer.setContentsMargins(6, 6, 6, 6)
@@ -1315,7 +1346,7 @@ class SerialTool(QMainWindow):
     # -------------------------------------------------------------- #
     def refresh_ports(self):
         current = self._current_port_device()
-        ports = sorted(serial.tools.list_ports.comports(), key=lambda p: p.device)
+        ports = enumerate_serial_ports()
         entries = []
         hidden = 0
         for p in ports:
@@ -2340,7 +2371,12 @@ def main():
     app.setWindowIcon(
         QIcon(bundled_icon) if os.path.isfile(bundled_icon) else theme_icon)
     w = SerialTool()
-    w.show()
+    if os.environ.get("QT5COM_FULLSCREEN") == "1":
+        # linuxfb has no window manager to correct saved desktop geometry.
+        w.setGeometry(app.primaryScreen().geometry())
+        w.showFullScreen()
+    else:
+        w.show()
     sys.exit(app.exec_())
 
 

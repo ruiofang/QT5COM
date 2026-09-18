@@ -1,6 +1,6 @@
 """Interactive VT console over the application's existing serial port."""
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-                            QComboBox, QApplication)
+                            QComboBox, QApplication, QToolButton, QMenu)
 from ssh_terminal import SSHTerminal
 
 
@@ -34,9 +34,14 @@ class SerialTerminalPanel(QWidget):
         self.backspace.currentIndexChanged.connect(self.update_keys)
         self.dimensions = QLabel()
         self.output.size_changed.connect(self.update_dimensions)
-        copy_size = QPushButton('复制尺寸命令')
-        copy_size.setToolTip('复制 TERM 和 stty 设置命令；登录 Linux 后按需粘贴执行，不会自动发送。')
-        copy_size.clicked.connect(self.copy_size_command)
+        self.sync_size_button = QToolButton()
+        self.sync_size_button.setText('同步尺寸')
+        self.sync_size_button.setPopupMode(QToolButton.MenuButtonPopup)
+        self.sync_size_button.setToolTip('在 Linux shell 提示符下点击，发送当前行列数的 stty 命令。窗口缩放后可再次同步；非 Linux 设备请勿使用。')
+        self.sync_size_button.clicked.connect(self.sync_size)
+        size_menu = QMenu(self.sync_size_button)
+        size_menu.addAction('复制尺寸命令', self.copy_size_command)
+        self.sync_size_button.setMenu(size_menu)
         self.interrupt_button = QPushButton('Ctrl+C')
         self.interrupt_button.clicked.connect(lambda: self.send_input(b'\x03'))
         row.addWidget(QLabel('Enter'))
@@ -45,11 +50,11 @@ class SerialTerminalPanel(QWidget):
         row.addWidget(self.backspace)
         row.addStretch()
         row.addWidget(self.dimensions)
-        row.addWidget(copy_size)
+        row.addWidget(self.sync_size_button)
         row.addWidget(self.interrupt_button)
         layout.addLayout(row)
         hint = QLabel('点击终端直接输入；Enter 登录/执行 · Tab 补全 · ↑↓ 历史 · Ctrl+C 中断 · Ctrl+Shift+C/V 复制/粘贴。\n'
-                      '不需要 IP。输入由设备回显，本地不记录发送内容；串口窗口尺寸需在设备端按需设置。')
+                      'Linux 输出过窄：在 shell 提示符下点击“同步尺寸”，再执行命令；ps auxww 可显示完整命令行。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.update_dimensions(self.output.screen.columns, self.output.screen.lines)
@@ -62,9 +67,18 @@ class SerialTerminalPanel(QWidget):
     def update_dimensions(self, columns, lines):
         self.dimensions.setText(f'{columns} 列 × {lines} 行')
 
-    def copy_size_command(self):
+    def size_command(self):
         screen = self.output.screen
-        QApplication.clipboard().setText(f'export TERM=xterm-256color; stty cols {screen.columns} rows {screen.lines}')
+        return f'stty cols {screen.columns} rows {screen.lines}; export TERM=xterm-256color COLUMNS={screen.columns} LINES={screen.lines}'
+
+    def sync_size(self):
+        # Serial has no SSH-style resize channel. Only the explicit button
+        # action may send shell commands; opening/resizing must send nothing.
+        self.send_input(self.size_command().encode('ascii') + self.newline.currentData())
+        self.output.setFocus()
+
+    def copy_size_command(self):
+        QApplication.clipboard().setText(self.size_command())
         self.output.setFocus()
 
     def set_connected(self, connected, description=''):
@@ -72,6 +86,7 @@ class SerialTerminalPanel(QWidget):
         self.open_button.setText('关闭串口' if connected else '打开串口')
         self.output.set_connected(connected)
         self.interrupt_button.setEnabled(connected)
+        self.sync_size_button.setEnabled(connected)
         if connected:
             self.output.reset_stream()
             self.output.setFocus()

@@ -1,0 +1,14 @@
+[Unit]
+Description=QT5COM serial and SSH terminal on T113 framebuffer
+After=local-fs.target
+RequiresMountsFor=/mnt/UDISK/qt5com
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/UDISK/qt5com/app
+ExecStart=/mnt/UDISK/qt5com/bin/qt5com
+Restart=no
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
