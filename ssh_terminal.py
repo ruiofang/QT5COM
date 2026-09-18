@@ -6,8 +6,9 @@ import re
 
 import pyte
 from wcwidth import wcswidth
-from PyQt5.QtCore import Qt, QRect, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+from PyQt5.QtCore import Qt, QRect, QPoint, QPointF, QEvent, QTimer, pyqtSignal
+from PyQt5.QtGui import (QColor, QFont, QFontMetrics, QPainter, QInputMethodEvent,
+                         QTextLayout, QTextCharFormat, QTextFormat)
 from PyQt5.QtWidgets import QAbstractScrollArea, QApplication, QMenu
 
 
@@ -76,6 +77,8 @@ class TerminalScreen(pyte.HistoryScreen):
 class SSHTerminal(QAbstractScrollArea):
     data_ready = pyqtSignal(bytes)
     size_changed = pyqtSignal(int, int)
+    SELECTION_FG = '#101820'
+    SELECTION_BG = '#b8d8ff'
     COLORS = {
         'black': '#1b1d23', 'red': '#e06c75', 'green': '#98c379',
         'brown': '#e5c07b', 'blue': '#61afef', 'magenta': '#c678dd',
@@ -95,26 +98,47 @@ class SSHTerminal(QAbstractScrollArea):
         self.cell_height = max(1, math.ceil(metrics.height() * 1.12))
         self.ascent = metrics.ascent()
         self.connected = False
+        self.preedit = ''
+        self.preedit_cursor = 0
+        self.preedit_cursor_visible = True
+        self.preedit_formats = []
+        self.cursor_on = True
         self.responses_enabled = True
         self.return_bytes = b'\r'
         self.backspace_bytes = b'\x7f'
         self.decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         self.selection = None
+        self.dragging_selection = False
+        self.drag_position = QPoint()
+        self.selection_scroll_timer = QTimer(self)
+        self.selection_scroll_timer.setInterval(40)
+        self.selection_scroll_timer.timeout.connect(self._scroll_selection)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.viewport().setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.viewport().setFocusProxy(self)
+        self.viewport().setCursor(Qt.IBeamCursor)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setMinimumSize(300, 160)
         self.screen = TerminalScreen(80, 24, self._reply)
         self.stream = pyte.Stream(self.screen)
-        self.verticalScrollBar().valueChanged.connect(lambda _: self.viewport().update())
+        self.verticalScrollBar().valueChanged.connect(self._scroll_changed)
         self.setToolTip('直接输入；Ctrl+C 中断；Ctrl+Shift+C 复制；Ctrl+Shift+V 粘贴')
+        self.blink_timer = QTimer(self)
+        self.blink_timer.setInterval(max(200, QApplication.cursorFlashTime() // 2))
+        self.blink_timer.timeout.connect(self._blink_cursor)
 
     def set_connected(self, connected):
         self.connected = connected
+        if not connected:
+            self._cancel_preedit()
+        self._update_input_method()
         self.viewport().update()
 
     def reset_stream(self):
+        self._stop_selection_drag()
+        self._cancel_preedit()
         self.decoder.reset()
         self.screen = TerminalScreen(self.screen.columns, self.screen.lines, self._reply)
         self.stream = pyte.Stream(self.screen)
@@ -122,6 +146,7 @@ class SSHTerminal(QAbstractScrollArea):
         self._refresh()
 
     def clear(self):
+        self._stop_selection_drag()
         # Local clear must preserve remote terminal modes (e.g. application keys).
         self.screen.erase_in_display(2)
         self.screen.cursor_position()
@@ -147,13 +172,14 @@ class SSHTerminal(QAbstractScrollArea):
 
     def _refresh(self):
         scroll = self.verticalScrollBar()
-        bottom = scroll.value() == scroll.maximum()
+        bottom = scroll.value() == scroll.maximum() and not self.dragging_selection
         scroll.setRange(0, 0 if self.screen.primary is not None else len(self.screen.history.top))
         scroll.setPageStep(self.screen.lines)
         if bottom:
             scroll.setValue(scroll.maximum())
         self.screen.dirty.clear()
         self.viewport().update()
+        self._update_input_method()
 
     def _lines(self):
         history = [] if self.screen.primary is not None else list(self.screen.history.top)
@@ -210,7 +236,7 @@ class SSHTerminal(QAbstractScrollArea):
                 if char.reverse:
                     fg, bg = bg, fg
                 if self._selected(offset + y, x):
-                    bg = QColor('#375a7f')
+                    fg, bg = QColor(self.SELECTION_FG), QColor(self.SELECTION_BG)
                 rect = QRect(4 + x * self.cell_width, 4 + y * self.cell_height,
                              self.cell_width * width, self.cell_height)
                 painter.fillRect(rect, bg)
@@ -224,15 +250,92 @@ class SSHTerminal(QAbstractScrollArea):
                     painter.setPen(fg)
                     painter.drawText(rect.x(), rect.y() + self.ascent, char.data)
                 x += width
-        if offset == self.verticalScrollBar().maximum() and not self.screen.cursor.hidden:
-            cursor = self.screen.cursor
-            rect = QRect(4 + min(cursor.x, self.screen.columns - 1) * self.cell_width,
-                         4 + cursor.y * self.cell_height, self.cell_width, self.cell_height)
-            painter.setPen(QPen(QColor('#88c0d0' if self.connected else '#5c6370')))
-            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        at_bottom = offset == self.verticalScrollBar().maximum()
+        if self.preedit and at_bottom:
+            rect = self._cursor_rect(include_preedit=False)
+            layout = self._preedit_layout()
+            painter.fillRect(QRect(rect.x(), rect.y(), max(2, int(layout.boundingRect().width()) + 2),
+                                  self.cell_height), QColor('#171a21'))
+            layout.draw(painter, QPointF(rect.x(), rect.y()))
+        if (at_bottom and not self.screen.cursor.hidden and self.cursor_on
+                and (not self.preedit or self.preedit_cursor_visible)):
+            painter.fillRect(self._cursor_rect(), QColor('#88c0d0' if self.connected else '#5c6370'))
+
+    def _preedit_layout(self):
+        layout = QTextLayout(self.preedit, self.font())
+        default = QTextLayout.FormatRange()
+        default.start = 0
+        default.length = len(self.preedit.encode('utf-16-le')) // 2
+        default.format = QTextCharFormat()
+        default.format.setForeground(QColor('#d8dee9'))
+        default.format.setFontUnderline(True)
+        layout.setFormats([default] + self.preedit_formats)
+        layout.beginLayout()
+        line = layout.createLine()
+        if line.isValid():
+            line.setLineWidth(100000)
+        layout.endLayout()
+        return layout
+
+    def _cursor_rect(self, include_preedit=True):
+        cursor = self.screen.cursor
+        x = 4 + min(cursor.x, self.screen.columns - 1) * self.cell_width
+        if include_preedit and self.preedit:
+            layout = self._preedit_layout()
+            line = layout.lineAt(0)
+            x += int(line.cursorToX(self.preedit_cursor)[0])
+        return QRect(x, 4 + cursor.y * self.cell_height, 2, self.cell_height)
+
+    def _update_input_method(self):
+        if self.hasFocus():
+            QApplication.inputMethod().update(Qt.ImEnabled | Qt.ImCursorRectangle | Qt.ImCursorPosition
+                                              | Qt.ImSurroundingText | Qt.ImAnchorPosition)
+
+    def _cancel_preedit(self):
+        self.preedit = ''
+        self.preedit_formats = []
+        self.preedit_cursor = 0
+        if self.hasFocus():
+            QApplication.inputMethod().reset()
+
+    def _blink_cursor(self):
+        self.cursor_on = not self.cursor_on
+        self.viewport().update()
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.cursor_on = True
+        if QApplication.cursorFlashTime() > 0:
+            self.blink_timer.start()
+        self._update_input_method()
+        self.viewport().update()
+
+    def focusOutEvent(self, event):
+        self._stop_selection_drag()
+        self._cancel_preedit()
+        self.blink_timer.stop()
+        self.cursor_on = True
+        super().focusOutEvent(event)
+        self.viewport().update()
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.InputMethod:
+            self.inputMethodEvent(event)
+            return True
+        if event.type() == QEvent.InputMethodQuery:
+            for query in (Qt.ImEnabled, Qt.ImCursorRectangle, Qt.ImFont, Qt.ImHints,
+                          Qt.ImCursorPosition, Qt.ImAnchorPosition, Qt.ImSurroundingText,
+                          Qt.ImCurrentSelection):
+                if event.queries() & query:
+                    value = self._cursor_rect() if query == Qt.ImCursorRectangle else self.inputMethodQuery(query)
+                    event.setValue(query, value)
+            return True
+        return super().viewportEvent(event)
 
     def _send(self, data):
         if self.connected:
+            self._stop_selection_drag()
+            self.cursor_on = True
             self.selection = None
             self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
             self.data_ready.emit(data)
@@ -245,6 +348,10 @@ class SSHTerminal(QAbstractScrollArea):
         return super().event(event)
 
     def keyPressEvent(self, event):
+        if self.preedit:
+            # Composition keys belong to the IME, not the remote shell.
+            event.accept()
+            return
         key, mods = event.key(), event.modifiers()
         if mods & Qt.ControlModifier and mods & Qt.ShiftModifier:
             if key == Qt.Key_C:
@@ -252,6 +359,9 @@ class SSHTerminal(QAbstractScrollArea):
                 return
             if key == Qt.Key_V:
                 self.paste()
+                return
+            if key == Qt.Key_A:
+                self.select_all()
                 return
         if mods & Qt.ShiftModifier and key in (Qt.Key_PageUp, Qt.Key_PageDown):
             delta = self.screen.lines * (-1 if key == Qt.Key_PageUp else 1)
@@ -284,15 +394,48 @@ class SSHTerminal(QAbstractScrollArea):
         event.accept()
 
     def inputMethodEvent(self, event):
+        if not self.connected:
+            event.ignore()
+            return
         if event.commitString():
             self._send(event.commitString().encode('utf-8'))
+        self.preedit = event.preeditString()
+        self.preedit_cursor = len(self.preedit.encode('utf-16-le')) // 2
+        self.preedit_cursor_visible = True
+        self.preedit_formats = []
+        for attribute in event.attributes():
+            if attribute.type == QInputMethodEvent.Cursor:
+                self.preedit_cursor = attribute.start
+                self.preedit_cursor_visible = attribute.length != 0
+            elif attribute.type == QInputMethodEvent.TextFormat:
+                # Native IMEs deliver a base QTextFormat, unlike manually
+                # constructed events which may contain QTextCharFormat.
+                value = attribute.value
+                if not isinstance(value, QTextFormat) or not value.isCharFormat():
+                    continue
+                fmt = QTextLayout.FormatRange()
+                fmt.start, fmt.length = attribute.start, attribute.length
+                fmt.format = value.toCharFormat()
+                self.preedit_formats.append(fmt)
+        self.cursor_on = True
+        self._update_input_method()
+        self.viewport().update()
         event.accept()
 
     def inputMethodQuery(self, query):
+        if query == Qt.ImEnabled:
+            return self.connected
         if query == Qt.ImCursorRectangle:
-            return QRect(4 + self.screen.cursor.x * self.cell_width,
-                         4 + self.screen.cursor.y * self.cell_height,
-                         self.cell_width, self.cell_height)
+            return self._cursor_rect().translated(self.viewport().pos())
+        if query == Qt.ImFont:
+            return self.font()
+        if query == Qt.ImHints:
+            return int(Qt.ImhNone)
+        if query in (Qt.ImCursorPosition, Qt.ImAnchorPosition, Qt.ImAbsolutePosition):
+            return 0
+        if query in (Qt.ImSurroundingText, Qt.ImCurrentSelection, Qt.ImTextBeforeCursor, Qt.ImTextAfterCursor):
+            # Remote screen contents may contain secrets and aren't locally editable.
+            return ''
         return super().inputMethodQuery(query)
 
     def paste(self):
@@ -314,14 +457,67 @@ class SSHTerminal(QAbstractScrollArea):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.setFocus()
+            self.dragging_selection = True
+            self.drag_position = event.pos()
             pos = self._position(event.pos())
             self.selection = (pos, pos)
             self.viewport().update()
+            event.accept()
 
     def mouseMoveEvent(self, event):
-        if event.buttons() & Qt.LeftButton and self.selection:
+        if event.buttons() & Qt.LeftButton and self.selection and self.dragging_selection:
+            self.drag_position = event.pos()
             self.selection = (self.selection[0], self._position(event.pos()))
+            if self._selection_scroll_delta():
+                self.selection_scroll_timer.start()
+            else:
+                self.selection_scroll_timer.stop()
             self.viewport().update()
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self.dragging_selection and self.selection:
+                self.selection = (self.selection[0], self._position(event.pos()))
+            self._stop_selection_drag()
+            self.viewport().update()
+            event.accept()
+
+    def _stop_selection_drag(self):
+        self.dragging_selection = False
+        self.selection_scroll_timer.stop()
+
+    def hideEvent(self, event):
+        self._stop_selection_drag()
+        super().hideEvent(event)
+
+    def _selection_scroll_delta(self):
+        y = self.drag_position.y()
+        edge = min(self.cell_height, 24)
+        if y < edge:
+            return -min(8, 1 + (edge - y) // self.cell_height)
+        if y >= self.viewport().height() - edge:
+            return min(8, 1 + (y - self.viewport().height() + edge) // self.cell_height)
+        return 0
+
+    def _scroll_selection(self):
+        if not self.dragging_selection or not self.selection:
+            self.selection_scroll_timer.stop()
+            return
+        delta = self._selection_scroll_delta()
+        scroll = self.verticalScrollBar()
+        scroll.setValue(scroll.value() + delta)
+
+    def _scroll_changed(self, value):
+        if self.dragging_selection and self.selection:
+            self.selection = (self.selection[0], self._position(self.drag_position))
+        self.viewport().update()
+
+    def select_all(self):
+        self._stop_selection_drag()
+        rows = self._lines()
+        self.selection = ((0, 0), (len(rows) - 1, self.screen.columns))
+        self.viewport().update()
 
     def copy_selection(self):
         if not self.selection:
@@ -335,7 +531,9 @@ class SSHTerminal(QAbstractScrollArea):
         QApplication.clipboard().setText('\n'.join(text))
 
     def contextMenuEvent(self, event):
+        self._stop_selection_drag()
         menu = QMenu(self)
+        menu.addAction('全选（Ctrl+Shift+A）', self.select_all)
         copy_action = menu.addAction('复制（Ctrl+Shift+C）', self.copy_selection)
         copy_action.setEnabled(bool(self.selection))
         paste_action = menu.addAction('粘贴（Ctrl+Shift+V）', self.paste)

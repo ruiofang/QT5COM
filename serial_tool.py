@@ -87,9 +87,13 @@ def config_path() -> str:
     return user_ini
 
 # ---- 修正中文路径下 Qt 插件路径 ----
+if __name__ == "__main__":
+    from qt_input_method import select_qt_runtime_for_input_method
+    select_qt_runtime_for_input_method()
 try:
     import PyQt5
-    _qt_plugin = os.path.join(os.path.dirname(PyQt5.__file__), "Qt5", "plugins")
+    from PyQt5.QtCore import QLibraryInfo
+    _qt_plugin = QLibraryInfo.location(QLibraryInfo.PluginsPath)
     if os.path.isdir(_qt_plugin):
         os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH",
                               os.path.join(_qt_plugin, "platforms"))
