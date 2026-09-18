@@ -1,13 +1,15 @@
 """Interactive VT console over the application's existing serial port."""
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                             QComboBox, QApplication, QToolButton, QMenu)
 from ssh_terminal import SSHTerminal
 
 
 class SerialTerminalPanel(QWidget):
-    def __init__(self, send, toggle_port, parent=None):
+    def __init__(self, send, toggle_port, parent=None, settings=None):
         super().__init__(parent)
         self.send = send
+        self.settings = settings
         self._session_description = None
         layout = QVBoxLayout(self)
         row = QHBoxLayout()
@@ -30,8 +32,13 @@ class SerialTerminalPanel(QWidget):
             self.newline.addItem(label, data)
         self.newline.currentIndexChanged.connect(self.update_keys)
         self.backspace = QComboBox()
-        self.backspace.addItem('DEL (0x7F)', b'\x7f')
+        self.backspace.addItem('自动 / vi 兼容', None)
         self.backspace.addItem('BS (0x08)', b'\x08')
+        self.backspace.addItem('DEL (0x7F)', b'\x7f')
+        self.backspace.setToolTip('自动：默认发送 Ctrl+H，兼容 vi，并跟随远端 DECBKM 设置。登录界面若要求 DEL，可手动选择 0x7F。Delete 键仍发送独立的删除序列。')
+        if settings is not None:
+            saved = settings.value('serial_terminal/backspace', 'auto')
+            self.backspace.setCurrentIndex({'auto': 0, 'bs': 1, 'del': 2}.get(saved, 0))
         self.backspace.currentIndexChanged.connect(self.update_keys)
         self.dimensions = QLabel()
         self.output.size_changed.connect(self.update_dimensions)
@@ -44,7 +51,7 @@ class SerialTerminalPanel(QWidget):
         size_menu.addAction('复制尺寸命令', self.copy_size_command)
         self.sync_size_button.setMenu(size_menu)
         self.interrupt_button = QPushButton('Ctrl+C')
-        self.interrupt_button.clicked.connect(lambda: self.send_input(b'\x03'))
+        self.interrupt_button.clicked.connect(self.interrupt)
         self.refresh_prompt_button = QPushButton('刷新提示符')
         self.refresh_prompt_button.setToolTip('发送 Ctrl+L，让 Linux shell 重绘当前命令行；不会发送 Enter。非终端设备请勿使用。')
         self.refresh_prompt_button.clicked.connect(self.refresh_prompt)
@@ -63,11 +70,23 @@ class SerialTerminalPanel(QWidget):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.update_dimensions(self.output.screen.columns, self.output.screen.lines)
+        self.update_keys()
         self.set_connected(False)
 
     def update_keys(self):
         self.output.return_bytes = self.newline.currentData()
-        self.output.backspace_bytes = self.backspace.currentData()
+        value = self.backspace.currentData()
+        self.output.backspace_bytes = value if value is not None else b'\x08'
+        self.output.backspace_override = value is not None
+        if self.settings is not None:
+            self.settings.setValue('serial_terminal/backspace', ('auto', 'bs', 'del')[self.backspace.currentIndex()])
+        if self.output.connected:
+            # Return focus after the combo popup has closed, not while it owns focus.
+            QTimer.singleShot(0, self.output.setFocus)
+
+    def interrupt(self):
+        self.output.reset_input()
+        self.send_input(b'\x03')
 
     def update_dimensions(self, columns, lines):
         self.dimensions.setText(f'{columns} 列 × {lines} 行')

@@ -18,12 +18,12 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ENTRY = HERE / "serial_tool.py"
-APP_NAME = "SerialDebugTool"
+ENTRY = HERE / "main.py"
+APP_NAME = "DebugTool"
 
 
 def read_meta():
-    """从 serial_tool.py 读取 __version__ / __author__."""
+    """从 main.py 读取 __version__ / __author__."""
     text = ENTRY.read_text(encoding="utf-8")
     m_ver = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
     m_auth = re.search(r'__author__\s*=\s*["\']([^"\']+)["\']', text)
@@ -61,12 +61,12 @@ VSVersionInfo(
           u'040904B0',
           [
             StringStruct(u'CompanyName',      u'{author}'),
-            StringStruct(u'FileDescription',  u'Serial Debug Tool'),
+            StringStruct(u'FileDescription',  u'DebugTool'),
             StringStruct(u'FileVersion',      u'{version}'),
             StringStruct(u'InternalName',     u'{APP_NAME}'),
             StringStruct(u'LegalCopyright',   u'Copyright (c) {author}'),
             StringStruct(u'OriginalFilename', u'{APP_NAME}.exe'),
-            StringStruct(u'ProductName',      u'Serial Debug Tool'),
+            StringStruct(u'ProductName',      u'DebugTool'),
             StringStruct(u'ProductVersion',   u'{version}')
           ])
       ]),
@@ -118,7 +118,7 @@ def build():
     version, author = read_meta()
     is_win = sys.platform.startswith("win")
 
-    # 产物名包含版本号，如 SerialDebugTool-V1.0.2.exe / SerialDebugTool-V1.0.2-linux
+    # 产物名包含版本号，如 DebugTool-V1.0.2.exe / DebugTool-V1.0.2-linux
     plat_suffix = "" if is_win else f"-{sys.platform}"
     name = f"{APP_NAME}-{version}{plat_suffix}"
 
@@ -131,6 +131,7 @@ def build():
         "--noconfirm",
         "--hidden-import", "serial",
         "--hidden-import", "serial.tools.list_ports",
+        "--add-data", str(HERE / "app.png") + os.pathsep + ".",
     ]
 
     # 图标

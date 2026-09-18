@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # -*- coding: utf-8 -*-
 #
-# Serial Debug Tool 安装/卸载脚本 (Linux)
+# DebugTool 安装/卸载脚本 (Linux)
 # 安装路径: /opt/qt5com
 # 桌面入口: /usr/share/applications/qt5com.desktop
-# 启动命令: qt5com
+# 启动命令: DebugTool (兼容 qt5com)
 #
 # 用法:
 #   sudo ./install.sh            # 安装
@@ -12,10 +12,11 @@
 #
 set -e
 
-APP_NAME="Serial Debug Tool"
+APP_NAME="DebugTool"
 APP_ID="qt5com"
 INSTALL_DIR="/opt/qt5com"
-BIN_LINK="/usr/local/bin/qt5com"
+BIN_LINK="/usr/local/bin/DebugTool"
+LEGACY_BIN_LINK="/usr/local/bin/qt5com"
 DESKTOP_FILE="/usr/share/applications/qt5com.desktop"
 ICON_DEST="/usr/share/pixmaps/qt5com.png"
 THEME_ICON_DEST="/usr/share/icons/hicolor/256x256/apps/qt5com.png"
@@ -34,7 +35,7 @@ uninstall() {
     need_root "$@"
     echo ">>> 卸载 $APP_NAME ..."
     rm -rf "$INSTALL_DIR"
-    rm -f  "$BIN_LINK" "$DESKTOP_FILE" "$ICON_DEST" "$THEME_ICON_DEST"
+    rm -f  "$BIN_LINK" "$LEGACY_BIN_LINK" "$DESKTOP_FILE" "$ICON_DEST" "$THEME_ICON_DEST"
 
     # 清理各用户的配置文件 (~/.config/qt5com)
     echo ">>> 清理用户配置文件 ..."
@@ -65,15 +66,16 @@ install_app() {
     if [[ -n "$1" && -f "$1" ]]; then
         EXE="$1"
     else
-        # 自动寻找 dist/SerialDebugTool-*
-        CANDIDATE=$(ls -1 "$HERE/dist/"SerialDebugTool-* 2>/dev/null | grep -v '\.exe$' | head -n1 || true)
-        if [[ -n "$CANDIDATE" && -f "$CANDIDATE" ]]; then
-            EXE="$CANDIDATE"
-        fi
+        # 仅选择 Linux 可执行文件，避免误选源码压缩包。
+        for CANDIDATE in "$HERE"/dist/DebugTool-*-linux; do
+            if [[ -f "$CANDIDATE" && -x "$CANDIDATE" ]]; then
+                EXE="$CANDIDATE"
+            fi
+        done
     fi
     if [[ -z "$EXE" ]]; then
         echo "✘ 未找到可执行文件。请先 'python3 build.py' 或手动指定:"
-        echo "    sudo $0 /path/to/SerialDebugTool"
+        echo "    sudo $0 /path/to/DebugTool"
         exit 1
     fi
     echo ">>> 使用可执行文件: $EXE"
@@ -87,7 +89,7 @@ install_app() {
     # 3. 安装
     echo ">>> 安装到 $INSTALL_DIR ..."
     mkdir -p "$INSTALL_DIR"
-    install -m 0755 "$EXE" "$INSTALL_DIR/qt5com"
+    install -m 0755 "$EXE" "$INSTALL_DIR/DebugTool"
     if [[ -n "$ICON_SRC" ]]; then
         install -m 0644 "$ICON_SRC" "$INSTALL_DIR/app.png"
         install -m 0644 "$ICON_SRC" "$ICON_DEST"
@@ -96,26 +98,27 @@ install_app() {
         mkdir -p "$(dirname "$THEME_ICON_DEST")"
         install -m 0644 "$ICON_SRC" "$THEME_ICON_DEST"
     fi
-    # 放开安装目录权限, 便于普通用户在此目录保存配置/日志 (便携模式)
+    # 保持系统安装目录只允许管理员写入，普通用户配置自动回退到用户目录。
     chmod 0755 "$INSTALL_DIR"
 
     # 4. /usr/local/bin 软链接
-    ln -sf "$INSTALL_DIR/qt5com" "$BIN_LINK"
+    ln -sf "$INSTALL_DIR/DebugTool" "$BIN_LINK"
+    ln -sf "$INSTALL_DIR/DebugTool" "$LEGACY_BIN_LINK"
 
     # 5. 桌面入口
     cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=$APP_NAME
-GenericName=Serial Debug Tool
-Comment=串口调试工具 (PyQt5)
-Exec=$INSTALL_DIR/qt5com
+GenericName=DebugTool
+Comment=串口、SSH、TCP 和 UDP 调试工具 (PyQt5)
+Exec=$INSTALL_DIR/DebugTool
 Icon=$APP_ID
 Terminal=false
 Categories=Development;Electronics;
-Keywords=serial;uart;com;rs232;debug;
+Keywords=serial;uart;com;rs232;ssh;tcp;udp;debug;
 StartupNotify=true
-StartupWMClass=SerialDebugTool
+StartupWMClass=DebugTool
 DBusActivatable=false
 EOF
     chmod 0644 "$DESKTOP_FILE"
@@ -128,7 +131,7 @@ EOF
     # 7. 确保 dialout 组提示
     echo
     echo "✔ 安装完成!"
-    echo "   启动:   qt5com  (或在应用菜单中点击 \"$APP_NAME\")"
+    echo "   启动:   DebugTool  (或在应用菜单中点击 \"$APP_NAME\")"
     echo "   卸载:   sudo $0 --uninstall"
     echo
     echo "Tips: 如果打开串口提示权限不足，请执行:"

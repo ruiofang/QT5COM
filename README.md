@@ -1,6 +1,8 @@
-# Serial Debug Tool
+# DebugTool
 
-一个基于 **Python 3 + PyQt5 + pyserial + Paramiko** 的跨平台串口与 SSH 调试工具，打包后为便携式可执行程序。
+启动入口为 `main.py`，打包程序名为 `DebugTool`。版本保持 V1.0.2。为兼容原有设置，继续使用 `serial_tool.ini`、`qt5com` 配置目录及 Modbus 配置格式；T113 的服务名和部署路径也保持兼容。
+
+一个基于 **Python 3 + PyQt5 + pyserial + Paramiko** 的跨平台串口、SSH、TCP / UDP 调试工具，打包后为便携式可执行程序。
 
 - **版本**：V1.0.2
 - **作者**：RUIO
@@ -41,10 +43,10 @@
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-python3 serial_tool.py
+python3 main.py
 ```
 
-直接运行 `serial_tool.py` 时会自动使用项目 `.venv`（若存在），无需先激活环境；编辑器选择其他 Python 也可启动。Windows 安装依赖时使用 `.venv\Scripts\python.exe`。
+直接运行 `main.py` 时会自动使用项目 `.venv`（若存在），无需先激活环境；编辑器选择其他 Python 也可启动。Windows 安装依赖时使用 `.venv\Scripts\python.exe`。
 
 Linux 使用 Fcitx 时，若虚拟环境 Qt 缺少 Fcitx 插件，源码启动会优先选用已安装且兼容当前 Python 的系统 PyQt5，避免混用不同 Qt 补丁版本的输入法插件；其他依赖仍使用虚拟环境，不修改系统配置。
 
@@ -53,13 +55,32 @@ Linux 使用 Fcitx 时，若虚拟环境 Qt 缺少 Fcitx 插件，源码启动�
 1. 左侧选择设备（如 `/dev/ttyUSB0`），按设备要求设置波特率及帧格式（常见 `115200 / 8N1`），打开串口。
 2. 切到 **串口终端**。设备未主动输出时会显示等待提示；Linux shell 可点击 **刷新提示符**（Ctrl+L）重绘当前命令行，不会发送 Enter。需要登录时再按 **Enter** 等待 `login:`。
 3. 按提示直接输入用户名、密码并回车。字符实时发送，由设备决定是否回显；本地不记录终端发送内容或输入历史，若设备主动回显密码，回显仍属于接收数据。
-4. 登录后直接输入 Linux 命令；**Tab** 补全、**↑/↓** 远端历史、**Ctrl+C** 中断、**Ctrl+Shift+C/V** 复制/粘贴。Enter 默认 CR，可切换 LF/CRLF；退格默认 DEL，可改为 BS。单次粘贴限 4096 字节。
+4. 登录后直接输入 Linux 命令；**Tab** 补全、**↑/↓** 远端历史、**Ctrl+C** 中断、**Ctrl+Shift+C/V** 复制/粘贴。Enter 默认 CR，可切换 LF/CRLF；退格默认“自动 / vi 兼容”（Ctrl+H / 0x08），跟随远端 DECBKM 设置，也可手动固定 BS 或 DEL；选择会保存。单次粘贴限 4096 字节。
+
+输入恢复：修改串口终端的回车/退格设置后，焦点会自动回到终端。输入法状态残留时，Esc 或 Ctrl+C 可解除预编辑拦截；也可右键选择“恢复键盘输入（仅本地）”，清理本地输入状态且不向设备发送任何字节。
+
+终端绘制按相同样式的连续 ASCII 文本合并，减少满屏输出时的绘制开销；中文和组合字符仍按终端单元定位。串口没有自动窗口尺寸协商，请在 shell 提示符下点击“同步尺寸”后再进入 vi；不要在编辑器内发送尺寸命令。
+
+vi 使用提示：先按 `i` / `a` 进入插入模式再输入、退格，`Esc` 返回命令模式。自动退格兼容远端 `stty erase ^H` 的 vi；若登录提示符要求 `0x7F`，可在底部退格选项选择 **DEL**。Backspace 与 Delete 独立编码，不会同时发送两个删除字节。如果 Vim 仅不能删除进入插入模式前的旧内容，可在 Vim 中使用 `:set backspace=indent,eol,start`（这是编辑器的删除范围设置，不适用于所有 BusyBox vi）。
 
 串口终端与 SSH 共用 ANSI/VT 终端显示，支持颜色、光标定位、清屏、备用屏幕及 2000 行滚动历史，可显示 `top` 等终端界面。共用左侧已打开的串口，不需要 IP 或 SSH 服务；设备必须提供串口控制台。串口无法像 SSH 一样传递窗口尺寸：登录 Linux、回到 shell 提示符后，点击 **同步尺寸**，会发送当前行列数的 `stty` 命令，并设置 `TERM`、`COLUMNS` 和 `LINES`。窗口大小变化后需再次点击；按钮下拉菜单仍提供 **复制尺寸命令**。连接和缩放窗口不会自动发送 shell 命令，非 Linux 设备请勿点击同步。
 
 如果 `ps aux` 的命令列被截断，先同步尺寸并重新运行；要查看不限制宽度的完整命令行，使用 `ps auxww`。远端已截断的旧输出无法由本地恢复，需重新执行命令。
 
 进入串口终端会停止循环发送、自动回复及 Modbus 自动读取；仅在此页激活时响应设备的终端查询。发送不附加 HEX 转换或校验和。原接收区、计数和文件日志仍可使用，终端发送日志只记录字节数；断开及同一串口、同一波特率重连后保留最后的屏幕供排查，切换串口或波特率则清空旧画面。重连不会让远端自动重发提示符，保留的画面不代表新收到的数据。
+
+### TCP / UDP 网络调试
+
+在左侧 **连接配置** 下拉框选择 **串口 / TCP 客户端 / TCP 服务端 / UDP**，只显示当前模式需要的连接参数。各种模式共用主窗口的发送、接收、HEX、收发计数及“显示 / 日志”设置。SSH 保留独立终端。切换模式会关闭原连接并停止循环发送；收发区内容和累计计数保留，可手动清空。
+
+- **TCP 客户端**：填写目标 IP / 域名与端口，点击连接；10 秒连接超时。
+- **TCP 服务端**：填写本地 IP、端口并开始监听；`0.0.0.0` 监听所有 IPv4 网卡，端口 `0` 自动分配，实际端口显示在状态栏。最多 16 个客户端，可选择单个发送、断开，或向全部客户端发送。
+- **UDP**：先绑定本地 IP、端口，再填写目标 IP 与端口收发数据。支持 IPv4 / IPv6 单播及 IPv4 广播；目标需填写 IP，暂不提供域名解析及组播加入。接收日志逐个记录数据报及来源地址。
+- 在共用“发送”页输入 UTF-8 文本或 HEX（例如 `01 03 00 FF`），支持附加 CRLF、校验和、发送历史、快捷按钮及循环发送。格式错误或发送失败会停止循环发送。网络模式下自动回复、Modbus RTU 和串口终端不可用，切回串口即可使用。
+- TCP 是字节流，接收块不等于协议报文；跨块中文使用增量解码。TCP 的 TX 表示已入本地发送队列，不代表对端应用已处理。显示限制为最近 2000 行 / 512 KiB 字符；勾选左侧“保存日志到文件”后，完整收发日志写入所选日志目录，不受显示截断影响，包含协议和对端地址。TCP 每连接收发缓冲上限 256 KiB，发送队列满时停止循环发送。
+- 保存模式、地址、端口与共用循环间隔，发送内容沿用主窗口历史保存规则。重新启动不会自动连接或循环发送，关闭连接、切换模式或退出程序会释放套接字。
+
+回归测试：`QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s qa -v`（需允许本机回环套接字）。
 
 ### SSH 命令终端（网络连接，需要 IP）
 
@@ -104,7 +125,7 @@ Linux 使用 Fcitx 时，若虚拟环境 Qt 缺少 Fcitx 插件，源码启动�
 - 缩减：点击“缩减末尾项…”，输入要保留的数量。只保留前面的寄存器及其名称和值，自动同步读取的从站、功能码、起始地址和数量；至少保留 1 项。取消对话框不会修改配置。
 - 点击“保存 MBP…”保存，文件名未填扩展名时自动补 `.mbp`。重新打开可恢复名称、数值和配置。
 - 编辑期间暂停自动读取；退出“编辑配置”后可继续设备读写。编辑或保存文件不会向设备写入数据。
-- 保存格式为 QT5COM JSON `.mbp`，Modbus Poll 二进制文件可导入后编辑并另存为此格式；如需保留原生文件，请使用不同文件名另存。
+- 保存格式为兼容旧版的 QT5COM JSON `.mbp`，Modbus Poll 二进制文件可导入后编辑并另存为此格式；如需保留原生文件，请使用不同文件名另存。
 
 #### 功能与格式说明
 
@@ -130,7 +151,7 @@ sudo usermod -aG dialout $USER     # 重新登录生效
 
 ### 打包为单文件可执行程序
 ```bash
-python3 build.py            # 产物: dist/SerialDebugTool-V1.0.2[.exe|-linux]
+python3 build.py            # 产物: dist/DebugTool-V1.0.2[.exe|-linux]
 python3 build.py --clean    # 清理构建产物
 ```
 - 打包前会自动调用 `gen_icon.py` 生成 `app.png` / `app.ico`（已存在则跳过）。
@@ -143,13 +164,13 @@ sudo ./install.sh                 # 安装到 /opt/qt5com，创建桌面快捷�
 sudo ./install.sh --uninstall     # 卸载
 ```
 安装后：
-- 终端命令：`qt5com`
-- 应用菜单：`Serial Debug Tool`
+- 终端命令：`DebugTool`（保留 `qt5com` 兼容命令）
+- 应用菜单：`DebugTool`
 - 桌面图标：`/usr/share/pixmaps/qt5com.png`
   - 同时按 Freedesktop 图标主题规范安装到 `/usr/share/icons/hicolor/256x256/apps/qt5com.png` 并刷新缓存，兼容 XFCE、GNOME、KDE 等桌面菜单。GNOME 通过 `qt5com.desktop` 和 `StartupWMClass` 将菜单、Dock 与运行窗口归为同一应用。
 - 配置文件：
   - 便携模式（程序所在目录可写时）：`<程序目录>/serial_tool.ini`
-  - 系统安装（`/opt/qt5com`）默认安装目录已开放可写权限，因此仍为 `/opt/qt5com/serial_tool.ini`
+  - 系统安装（`/opt/qt5com`）普通用户不可写，配置会回退到用户目录。
   - 若安装目录不可写，则自动回退到用户目录：
     - Linux/macOS：`~/.config/qt5com/serial_tool.ini`
     - Windows：`%APPDATA%\qt5com\serial_tool.ini`
@@ -168,7 +189,7 @@ python3 gen_icon.py           # 重新生成 app.png / app.ico
 ## 📂 运行期目录结构
 ```
 程序目录/
-├── SerialDebugTool-V1.0.2-linux  # Linux 可执行文件；Windows 为 SerialDebugTool-V1.0.2.exe
+├── DebugTool-V1.0.2-linux  # Linux 可执行文件；Windows 为 DebugTool-V1.0.2.exe
 ├── serial_tool.ini           # 便携配置
 └── logs/
     └── 2026-04-18.log        # 按日期归档日志

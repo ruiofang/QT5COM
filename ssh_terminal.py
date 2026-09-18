@@ -7,7 +7,7 @@ import re
 import pyte
 from wcwidth import wcswidth
 from PyQt5.QtCore import Qt, QRect, QPoint, QPointF, QEvent, QTimer, pyqtSignal
-from PyQt5.QtGui import (QColor, QFont, QFontMetrics, QPainter, QInputMethodEvent,
+from PyQt5.QtGui import (QColor, QFont, QFontMetrics, QFontMetricsF, QPainter, QInputMethodEvent,
                          QTextLayout, QTextCharFormat, QTextFormat)
 from PyQt5.QtWidgets import QAbstractScrollArea, QApplication, QMenu
 
@@ -16,7 +16,7 @@ class TerminalScreen(pyte.HistoryScreen):
     """Add xterm's alternate screen and terminal response callback to pyte."""
     STATE = ('savepoints', 'columns', 'lines', 'buffer', 'dirty', 'margins',
              'mode', 'title', 'icon_name', 'charset', 'g0_charset', 'g1_charset',
-             'tabstops', 'cursor', 'saved_columns', 'history')
+             'tabstops', 'cursor', 'saved_columns', 'history', 'backarrow_mode')
 
     def __init__(self, columns, lines, reply):
         self.primary = None
@@ -25,6 +25,10 @@ class TerminalScreen(pyte.HistoryScreen):
 
     def write_process_input(self, data):
         self.reply(data.encode('utf-8'))
+
+    def reset(self):
+        self.backarrow_mode = None
+        super().reset()
 
     def resize(self, lines=None, columns=None):
         lines, columns = lines or self.lines, columns or self.columns
@@ -61,6 +65,8 @@ class TerminalScreen(pyte.HistoryScreen):
                 # Reset the alternate screen without mutating the saved primary.
                 super().reset()
         super().set_mode(*modes, **kwargs)
+        if kwargs.get('private') and 67 in modes:
+            self.backarrow_mode = True
 
     def reset_mode(self, *modes, **kwargs):
         if kwargs.get('private') and any(m in (47, 1047, 1049) for m in modes):
@@ -72,6 +78,8 @@ class TerminalScreen(pyte.HistoryScreen):
                 self.resize(lines=lines, columns=columns)
                 self.dirty.update(range(self.lines))
         super().reset_mode(*modes, **kwargs)
+        if kwargs.get('private') and 67 in modes:
+            self.backarrow_mode = False
 
 
 class SSHTerminal(QAbstractScrollArea):
@@ -100,6 +108,7 @@ class SSHTerminal(QAbstractScrollArea):
         self.connected = False
         self.waiting_for_output = True
         self.preedit = ''
+        self._resetting_input_method = False
         self.preedit_cursor = 0
         self.preedit_cursor_visible = True
         self.preedit_formats = []
@@ -107,6 +116,7 @@ class SSHTerminal(QAbstractScrollArea):
         self.responses_enabled = True
         self.return_bytes = b'\r'
         self.backspace_bytes = b'\x7f'
+        self.backspace_override = False
         self.decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         self.selection = None
         self.dragging_selection = False
@@ -238,33 +248,65 @@ class SSHTerminal(QAbstractScrollArea):
         painter.fillRect(self.viewport().rect(), QColor('#171a21'))
         rows = self._lines()
         offset = self.verticalScrollBar().value()
+        default = self.screen.default_char
+        base_bg = QColor('#171a21')
+        fonts = {}
+        colors = {}
         for y in range(self.screen.lines):
             row = rows[offset + y] if offset + y < len(rows) else {}
             x = 0
             while x < self.screen.columns:
-                char = row.get(x, self.screen.default_char)
+                char = row.get(x, default)
                 if char.data == '':
                     x += 1
                     continue
-                width = max(1, wcswidth(char.data))
-                fg, bg = self._color(char.fg, bold=char.bold), self._color(char.bg, True)
-                if char.reverse:
-                    fg, bg = bg, fg
-                if self._selected(offset + y, x):
-                    fg, bg = QColor(self.SELECTION_FG), QColor(self.SELECTION_BG)
-                rect = QRect(4 + x * self.cell_width, 4 + y * self.cell_height,
-                             self.cell_width * width, self.cell_height)
-                painter.fillRect(rect, bg)
-                if char.data != ' ':
-                    font = self.font()
-                    font.setBold(char.bold)
-                    font.setItalic(char.italics)
-                    font.setUnderline(char.underscore)
-                    font.setStrikeOut(char.strikethrough)
-                    painter.setFont(font)
+                start = x
+                selected = self._selected(offset + y, x)
+                text = char.data
+                # Coalesce fixed-width ASCII with identical attributes. CJK,
+                # combining characters and wide cells retain explicit placement.
+                if len(text) == 1 and ' ' <= text <= '~':
+                    run = [text]
+                    x += 1
+                    while x < self.screen.columns:
+                        next_char = row.get(x, default)
+                        if (len(next_char.data) != 1 or not ' ' <= next_char.data <= '~'
+                                or next_char[1:] != char[1:]
+                                or self._selected(offset + y, x) != selected):
+                            break
+                        run.append(next_char.data)
+                        x += 1
+                    text = ''.join(run)
+                else:
+                    x += max(1, wcswidth(text))
+                style = (char.fg, char.bg, char.bold, char.reverse, selected)
+                if style not in colors:
+                    fg, bg = self._color(char.fg, bold=char.bold), self._color(char.bg, True)
+                    if char.reverse:
+                        fg, bg = bg, fg
+                    if selected:
+                        fg, bg = QColor(self.SELECTION_FG), QColor(self.SELECTION_BG)
+                    colors[style] = (fg, bg)
+                fg, bg = colors[style]
+                rect = QRect(4 + start * self.cell_width, 4 + y * self.cell_height,
+                             self.cell_width * (x - start), self.cell_height)
+                if bg != base_bg:
+                    painter.fillRect(rect, bg)
+                if text.strip() or char.underscore or char.strikethrough:
+                    font_style = (char.bold, char.italics, char.underscore, char.strikethrough)
+                    if font_style not in fonts:
+                        font = self.font()
+                        font.setBold(char.bold)
+                        font.setItalic(char.italics)
+                        font.setUnderline(char.underscore)
+                        font.setStrikeOut(char.strikethrough)
+                        font.setKerning(False)
+                        font.setLetterSpacing(QFont.AbsoluteSpacing,
+                                              self.cell_width - QFontMetricsF(font).horizontalAdvance('M'))
+                        fonts[font_style] = font
+                    painter.setFont(fonts[font_style])
                     painter.setPen(fg)
-                    painter.drawText(rect.x(), rect.y() + self.ascent, char.data)
-                x += width
+                    painter.drawText(rect.x(), rect.y() + self.ascent, text)
         if self.connected and self.waiting_for_output:
             painter.setPen(QColor('#abb2bf'))
             painter.drawText(self.viewport().rect().adjusted(12, 32, -12, -12),
@@ -312,11 +354,29 @@ class SSHTerminal(QAbstractScrollArea):
                                               | Qt.ImSurroundingText | Qt.ImAnchorPosition)
 
     def _cancel_preedit(self):
-        self.preedit = ''
-        self.preedit_formats = []
-        self.preedit_cursor = 0
-        if self.hasFocus():
-            QApplication.inputMethod().reset()
+        # Some native IMEs synchronously deliver a commit during reset().
+        # Cancellation must never transmit that pending text to a remote vi.
+        if self._resetting_input_method:
+            return
+        self._resetting_input_method = True
+        try:
+            if self.hasFocus():
+                QApplication.inputMethod().reset()
+        finally:
+            self.preedit = ''
+            self.preedit_formats = []
+            self.preedit_cursor = 0
+            self._resetting_input_method = False
+
+    def reset_input(self):
+        """Recover local input without sending commands or changing remote data."""
+        self.setFocus(Qt.OtherFocusReason)
+        self._stop_selection_drag()
+        self._cancel_preedit()
+        self.preedit_cursor_visible = True
+        self.cursor_on = True
+        self._update_input_method()
+        self.viewport().update()
 
     def _blink_cursor(self):
         self.cursor_on = not self.cursor_on
@@ -368,10 +428,6 @@ class SSHTerminal(QAbstractScrollArea):
         return super().event(event)
 
     def keyPressEvent(self, event):
-        if self.preedit:
-            # Composition keys belong to the IME, not the remote shell.
-            event.accept()
-            return
         key, mods = event.key(), event.modifiers()
         if mods & Qt.ControlModifier and mods & Qt.ShiftModifier:
             if key == Qt.Key_C:
@@ -383,13 +439,24 @@ class SSHTerminal(QAbstractScrollArea):
             if key == Qt.Key_A:
                 self.select_all()
                 return
+        if self.preedit:
+            # IMEs normally consume composition keys before they reach us.
+            # A stale preedit must not trap Esc or terminal control shortcuts.
+            if key == Qt.Key_Escape or (mods & Qt.ControlModifier and not mods & Qt.AltModifier):
+                self._cancel_preedit()
+            else:
+                event.accept()
+                return
         if mods & Qt.ShiftModifier and key in (Qt.Key_PageUp, Qt.Key_PageDown):
             delta = self.screen.lines * (-1 if key == Qt.Key_PageUp else 1)
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() + delta)
             return
         app_cursor = (1 << 5) in self.screen.mode
         prefix = b'\x1bO' if app_cursor else b'\x1b['
-        keys = {Qt.Key_Return: self.return_bytes, Qt.Key_Enter: self.return_bytes, Qt.Key_Backspace: self.backspace_bytes,
+        backspace = self.backspace_bytes
+        if not self.backspace_override and self.screen.backarrow_mode is not None:
+            backspace = b'\x08' if self.screen.backarrow_mode else b'\x7f'
+        keys = {Qt.Key_Return: self.return_bytes, Qt.Key_Enter: self.return_bytes, Qt.Key_Backspace: backspace,
                 Qt.Key_Tab: b'\t', Qt.Key_Backtab: b'\x1b[Z', Qt.Key_Escape: b'\x1b',
                 Qt.Key_Up: prefix + b'A', Qt.Key_Down: prefix + b'B',
                 Qt.Key_Right: prefix + b'C', Qt.Key_Left: prefix + b'D',
@@ -414,6 +481,9 @@ class SSHTerminal(QAbstractScrollArea):
         event.accept()
 
     def inputMethodEvent(self, event):
+        if self._resetting_input_method:
+            event.accept()
+            return
         if not self.connected:
             event.ignore()
             return
@@ -476,7 +546,7 @@ class SSHTerminal(QAbstractScrollArea):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.setFocus()
+            self.reset_input()
             self.dragging_selection = True
             self.drag_position = event.pos()
             pos = self._position(event.pos())
@@ -558,4 +628,6 @@ class SSHTerminal(QAbstractScrollArea):
         copy_action.setEnabled(bool(self.selection))
         paste_action = menu.addAction('粘贴（Ctrl+Shift+V）', self.paste)
         paste_action.setEnabled(self.connected)
+        menu.addSeparator()
+        menu.addAction('恢复键盘输入（仅本地）', self.reset_input)
         menu.exec_(event.globalPos())

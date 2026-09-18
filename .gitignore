@@ -9,3 +9,4 @@ SerialDebugTool-V1.0-linux.spec
 serial_tool.ini
 /.venv/
 /tests/
+ssh_known_hosts

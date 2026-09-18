@@ -3,19 +3,19 @@
 """
 生成程序 Logo：
     app.png  (256x256)  -- 通用 / Linux
-    app.ico             -- Windows（若安装了 Pillow）
+    app.ico             -- Windows（包含多种尺寸）
 用法:
     python3 gen_icon.py
 """
-import os
+import struct
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-from PyQt5.QtCore import Qt, QRectF, QPointF
+from PyQt5.QtCore import Qt, QRectF, QPointF, QByteArray, QBuffer, QIODevice
 from PyQt5.QtGui import (QImage, QPainter, QColor, QLinearGradient, QPen,
-                         QBrush, QFont, QPainterPath, QPolygonF)
+                         QBrush, QPainterPath)
 from PyQt5.QtWidgets import QApplication
 
 
@@ -26,8 +26,9 @@ def draw_logo(size: int = 256) -> QImage:
     p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing |
                      QPainter.SmoothPixmapTransform)
 
-    # ---- 背景：圆角渐变方块 ----
-    rect = QRectF(8, 8, size - 16, size - 16)
+    # Draw in a fixed design grid so every output size keeps the same proportions.
+    p.scale(size / 256.0, size / 256.0)
+    rect = QRectF(8, 8, 240, 240)
     grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
     grad.setColorAt(0.0, QColor("#1f6feb"))
     grad.setColorAt(1.0, QColor("#0d3b78"))
@@ -35,59 +36,61 @@ def draw_logo(size: int = 256) -> QImage:
     p.setPen(QPen(QColor(0, 0, 0, 40), 2))
     p.drawRoundedRect(rect, 40, 40)
 
-    # ---- 波形（代表串口通讯） ----
-    pen = QPen(QColor("#9ad0ff"), size * 0.05)
+    # Terminal window: common to serial consoles and SSH, without tiny lettering.
+    pen = QPen(QColor("#ffffff"), 10)
     pen.setCapStyle(Qt.RoundCap)
     pen.setJoinStyle(Qt.RoundJoin)
     p.setPen(pen)
+    p.setBrush(QColor(8, 35, 78, 80))
+    p.drawRoundedRect(QRectF(48, 48, 160, 108), 16, 16)
     p.setBrush(Qt.NoBrush)
-    path = QPainterPath()
-    baseline = size * 0.72
-    step = (size - 60) / 6
-    x = 30
-    y = baseline
-    path.moveTo(x, y)
-    levels = [0, -1, -1, 1, 1, 0, 0]  # 高低电平
-    amp = size * 0.09
-    for i, lv in enumerate(levels[1:], start=1):
-        nx = x + step
-        ny = baseline + lv * amp
-        # 垂直过渡
-        if ny != y:
-            path.lineTo(x, ny)
-        path.lineTo(nx, ny)
-        x, y = nx, ny
-    p.drawPath(path)
+    prompt = QPainterPath(QPointF(77, 79))
+    prompt.lineTo(99, 100)
+    prompt.lineTo(77, 121)
+    p.drawPath(prompt)
+    p.drawLine(QPointF(122, 121), QPointF(155, 121))
 
-    # ---- 文字 "COM" ----
-    p.setPen(QColor("white"))
-    font = QFont("Arial Black", int(size * 0.22), QFont.Black)
-    if not font.exactMatch():
-        font = QFont("Arial", int(size * 0.22), QFont.Black)
-    p.setFont(font)
-    text_rect = QRectF(0, size * 0.18, size, size * 0.38)
-    p.drawText(text_rect, Qt.AlignCenter, "COM")
-
-    # ---- 小圆点装饰 ----
+    # One terminal, multiple links: serial / TCP / UDP debugging.
+    pen.setColor(QColor("#9ad0ff"))
+    pen.setWidthF(8)
+    p.setPen(pen)
+    p.drawLine(QPointF(128, 161), QPointF(128, 204))
+    p.drawLine(QPointF(68, 184), QPointF(188, 184))
+    p.drawLine(QPointF(68, 184), QPointF(68, 204))
+    p.drawLine(QPointF(188, 184), QPointF(188, 204))
     p.setPen(Qt.NoPen)
     p.setBrush(QColor("#9ad0ff"))
-    r = size * 0.018
-    for cx in (size * 0.22, size * 0.5, size * 0.78):
-        p.drawEllipse(QPointF(cx, size * 0.85), r, r)
+    for x in (68, 128, 188):
+        p.drawEllipse(QPointF(x, 207), 11, 11)
 
     p.end()
     return img
 
 
 def save_ico(png_path: Path, ico_path: Path) -> bool:
-    try:
-        from PIL import Image
-    except ImportError:
-        print("提示: 未安装 Pillow，跳过 .ico 生成。`pip install pillow` 可生成 Windows 图标。")
-        return False
-    im = Image.open(png_path)
-    sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    im.save(ico_path, format="ICO", sizes=sizes)
+    # PNG-backed ICO entries avoid an optional Pillow dependency, so the
+    # Windows icon cannot silently remain on the previous design.
+    source = QImage(str(png_path))
+    if source.isNull():
+        raise ValueError(f"无法读取图标: {png_path}")
+    sizes = (16, 32, 48, 64, 128, 256)
+    entries, payloads = [], []
+    offset = 6 + 16 * len(sizes)
+    for size in sizes:
+        image = source.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.WriteOnly)
+        if not image.save(buffer, "PNG"):
+            raise IOError("无法编码图标")
+        buffer.close()
+        payload = bytes(data)
+        entries.append(struct.pack('<BBBBHHII', size % 256, size % 256,
+                                   0, 0, 1, 32, len(payload), offset))
+        payloads.append(payload)
+        offset += len(payload)
+    ico_path.write_bytes(struct.pack('<HHH', 0, 1, len(sizes))
+                         + b''.join(entries) + b''.join(payloads))
     return True
 
 

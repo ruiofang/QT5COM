@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Serial Debug Tool (PyQt5)
+DebugTool (PyQt5)
 Version: V1.0.2
 Author : RUIO
 License: MIT
@@ -45,6 +45,10 @@ def app_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def app_icon_path() -> str:
+    return os.path.join(getattr(sys, "_MEIPASS", app_dir()), "app.png")
 
 
 def config_path() -> str:
@@ -113,12 +117,13 @@ from PyQt5.QtWidgets import (
     QGridLayout, QGroupBox, QSplitter, QFileDialog, QMessageBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QStatusBar, QSpinBox, QTabWidget, QAction,
     QStyleFactory, QToolButton, QSizePolicy, QAbstractItemView,
-    QFormLayout, QInputDialog,
+    QFormLayout, QInputDialog, QStackedWidget,
 )
 
 import serial
 import serial.tools.list_ports
 from ssh_panel import SSHPanel
+from network_panel import NetworkPanel
 from serial_terminal import SerialTerminalPanel
 
 
@@ -587,7 +592,7 @@ class SerialReader(QThread):
 # ------------------------------------------------------------------ #
 #  主窗口
 # ------------------------------------------------------------------ #
-class SerialTool(QMainWindow):
+class DebugTool(QMainWindow):
     COMMON_BAUDS = ["1200", "2400", "4800", "9600", "19200", "38400",
                     "57600", "115200", "230400", "460800", "921600"]
     DATA_BITS = ["8", "7", "6", "5"]
@@ -609,8 +614,8 @@ class SerialTool(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Serial Debug Tool")
-        icon_path = os.path.join(app_dir(), "app.png")
+        self.setWindowTitle("DebugTool")
+        icon_path = app_icon_path()
         self.setWindowIcon(
             QIcon(icon_path) if os.path.isfile(icon_path)
             else QIcon.fromTheme("qt5com"))
@@ -646,6 +651,8 @@ class SerialTool(QMainWindow):
         # 自动发送定时器
         self.auto_send_timer = QTimer(self)
         self.auto_send_timer.timeout.connect(self.on_send_clicked)
+        self.transport_mode.setCurrentIndex(max(0, min(3, self.settings.value('transport_mode', 0, type=int))))
+        self._on_transport_changed(self.transport_mode.currentIndex())
 
     # -------------------------------------------------------------- #
     #  UI
@@ -851,7 +858,17 @@ class SerialTool(QMainWindow):
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(6, 6, 6, 6)
-        lv.addWidget(cfg_box)
+        connection_box = QGroupBox("连接配置")
+        connection_layout = QVBoxLayout(connection_box)
+        self.transport_mode = QComboBox()
+        self.transport_mode.addItems(["串口", "TCP 客户端", "TCP 服务端", "UDP"])
+        connection_layout.addWidget(self.transport_mode)
+        self.connection_stack = QStackedWidget()
+        self.connection_stack.addWidget(cfg_box)
+        self.network_panel = NetworkPanel(self.settings)
+        self.connection_stack.addWidget(self.network_panel)
+        connection_layout.addWidget(self.connection_stack)
+        lv.addWidget(connection_box)
         lv.addWidget(disp_box)
         lv.addStretch()
 
@@ -868,11 +885,12 @@ class SerialTool(QMainWindow):
         bv = QVBoxLayout(bottom)
         bv.setContentsMargins(0, 0, 0, 0)
         tab = QTabWidget()
+        self.io_tabs = tab
         tab.addTab(send_box, "发送")
         tab.addTab(auto_box, "自动回复")
         tab.addTab(self._build_quick_tab(), "快捷按钮")
         tab.addTab(self._build_modbus_tab(), "Modbus")
-        self.serial_terminal = SerialTerminalPanel(self._send_terminal_data, self.btn_open.click)
+        self.serial_terminal = SerialTerminalPanel(self._send_terminal_data, self.btn_open.click, settings=self.settings)
         tab.addTab(self.serial_terminal, "串口终端")
         self.ssh_panel = SSHPanel(self.settings)
         tab.addTab(self.ssh_panel, "SSH（网络）")
@@ -927,6 +945,13 @@ class SerialTool(QMainWindow):
         self.status.addPermanentWidget(self.lbl_counter)
         self.status.addPermanentWidget(self.btn_reset_cnt)
         self.status.addPermanentWidget(self.lbl_version)
+        self.transport_mode.currentIndexChanged.connect(self._on_transport_changed)
+        self.network_panel.received.connect(self._on_network_received)
+        self.network_panel.sent.connect(self._on_network_sent)
+        self.network_panel.status_changed.connect(self._on_network_status)
+        self.network_panel.stop_sending.connect(lambda: self.chk_auto_send.setChecked(False))
+        self.chk_log_save.toggled.connect(self._sync_shared_log)
+
 
     # -------------------------------------------------------------- #
     #  样式 / 主题
@@ -934,6 +959,11 @@ class SerialTool(QMainWindow):
     LIGHT_QSS = """
         QWidget { color: #202020; }
         QMainWindow, QDialog { background: #f5f6f8; }
+        QMenu { background: #ffffff; color: #202020; border: 1px solid #b5b5b5; padding: 4px; }
+        QMenu::item { padding: 6px 24px; background: transparent; }
+        QMenu::item:selected { background: #2a6fb2; color: #ffffff; }
+        QMenu::item:disabled { color: #747474; background: transparent; }
+        QMenu::separator { height: 1px; background: #d0d4d8; margin: 4px 8px; }
         QGroupBox {
             border: 1px solid #c8c8c8; border-radius: 6px;
             margin-top: 10px; padding-top: 6px;
@@ -1011,6 +1041,11 @@ class SerialTool(QMainWindow):
     DARK_QSS = """
         QWidget { color: #e6e6e6; }
         QMainWindow, QDialog { background: #232629; }
+        QMenu { background: #2b2f33; color: #e6e6e6; border: 1px solid #59616a; padding: 4px; }
+        QMenu::item { padding: 6px 24px; background: transparent; }
+        QMenu::item:selected { background: #245ba8; color: #ffffff; }
+        QMenu::item:disabled { color: #9aa3ad; background: transparent; }
+        QMenu::separator { height: 1px; background: #59616a; margin: 4px 8px; }
         QGroupBox {
             border: 1px solid #3c4045; border-radius: 6px;
             margin-top: 10px; padding-top: 6px;
@@ -1281,7 +1316,7 @@ class SerialTool(QMainWindow):
                 break
         else:
             return
-        if not (self.ser and self.ser.is_open):
+        if self.transport_mode.currentIndex() == 0 and not (self.ser and self.ser.is_open):
             QMessageBox.information(self, "提示", "请先打开串口。")
             return
         content_item = self.quick_table.item(r, 1)
@@ -1299,8 +1334,13 @@ class SerialTool(QMainWindow):
             if add_nl and not is_hex:
                 data += b"\r\n"
             data = self._maybe_append_checksum(data)
+            if self.transport_mode.currentIndex() != 0:
+                if self.network_panel.send_bytes(data):
+                    self._push_history(text)
+                return
             self.ser.write(data)
         except Exception as e:
+            self.chk_auto_send.setChecked(False)
             self.append_log(f"[快捷发送失败] {e}", color="#c0392b")
             return
         self.tx_bytes += len(data)
@@ -1528,7 +1568,71 @@ class SerialTool(QMainWindow):
     # -------------------------------------------------------------- #
     #  接收
     # -------------------------------------------------------------- #
+    def _on_transport_changed(self, index):
+        self.chk_auto_send.setChecked(False)
+        if index != 0:
+            self.chk_auto_reply.setChecked(False)
+        self.chk_modbus_poll.setChecked(False)
+        if self.network_panel.active:
+            self.network_panel.stop()
+        if self.ser is not None:
+            self.close_port()
+        self.connection_stack.setCurrentIndex(0 if index == 0 else 1)
+        if index:
+            self.network_panel.mode.setCurrentIndex(index - 1)
+            self.network_panel.update_controls()
+        self.chk_auto_reply.setEnabled(index == 0)
+        self.chk_auto_reply.setToolTip('自动回复用于串口模式')
+        for tab_index in (1, 3, 4):
+            self.io_tabs.setTabEnabled(tab_index, index == 0)
+        if index and self.io_tabs.currentIndex() in (1, 3, 4):
+            self.io_tabs.setCurrentIndex(0)
+        self.lbl_state.setText(self.transport_mode.currentText() + '：未连接')
+        self._sync_shared_log()
+
+    def _sync_shared_log(self, *args):
+        connected = bool(self.ser and self.ser.is_open) or self.network_panel.active
+        if self.chk_log_save.isChecked() and connected:
+            if self.log_file is None:
+                self._open_log_file()
+        else:
+            self._close_log_file()
+
+    def _on_network_status(self, message):
+        if self.transport_mode.currentIndex() == 0:
+            return
+        label = self.network_panel.mode.currentText()
+        if self.network_panel.active:
+            self._sync_shared_log()
+        self.lbl_state.setText(f'{label}：{message}')
+        self.append_log(f'[{label}] {message}')
+        self._write_log_raw(f'{datetime.datetime.now().isoformat(timespec="milliseconds")} [{label}] {message}\n')
+        if not self.network_panel.active:
+            self._sync_shared_log()
+
+    def _on_network_received(self, data, peer, text):
+        self.rx_bytes += len(data)
+        self._update_counter()
+        shown = bytes_to_hex_str(data) if self.chk_rx_hex.isChecked() else text
+        self._network_log('RX', peer, shown, len(data))
+
+    def _on_network_sent(self, data, peer):
+        self.tx_bytes += len(data)
+        self._update_counter()
+        shown = bytes_to_hex_str(data) if self.chk_tx_hex.isChecked() else data.decode('utf-8', errors='replace')
+        self._network_log('TX', peer, shown, len(data))
+
+    def _network_log(self, direction, peer, text, size):
+        label = self.network_panel.mode.currentText()
+        marker = '<<' if direction == 'RX' else '>>'
+        ts = f'[{now_ms()}] ' if self.chk_show_time.isChecked() else ''
+        self.append_log(f'{ts}{marker} [{label} {peer}] ({size} B) {text}',
+                        color='#1b5e20' if direction == 'RX' else '#0d47a1')
+        self._write_log_raw(f'{datetime.datetime.now().isoformat(timespec="milliseconds")} {direction} [{label} {peer}] {text}\n')
+
     def on_data_received(self, data: bytes):
+        if self.transport_mode.currentIndex() != 0:
+            return
         self.serial_terminal.output.feed(data)
         self.rx_bytes += len(data)
         self._update_counter()
@@ -1595,7 +1699,7 @@ class SerialTool(QMainWindow):
     #  发送
     # -------------------------------------------------------------- #
     def on_send_clicked(self):
-        if not (self.ser and self.ser.is_open):
+        if self.transport_mode.currentIndex() == 0 and not (self.ser and self.ser.is_open):
             if not self.chk_auto_send.isChecked():
                 QMessageBox.information(self, "提示", "请先打开串口。")
             return
@@ -1610,8 +1714,13 @@ class SerialTool(QMainWindow):
                 if self.chk_tx_newline.isChecked():
                     data += b"\r\n"
             data = self._maybe_append_checksum(data)
+            if self.transport_mode.currentIndex() != 0:
+                if self.network_panel.send_bytes(data):
+                    self._push_history(text)
+                return
             self.ser.write(data)
         except Exception as e:
+            self.chk_auto_send.setChecked(False)
             self.append_log(f"[发送失败] {e}", color="#c0392b")
             return
 
@@ -2147,7 +2256,7 @@ class SerialTool(QMainWindow):
             return
 
         if not isinstance(payload, dict) or payload.get("format") != "qt5com-mbp":
-            QMessageBox.warning(self, "打开失败", "文件格式不是 qt5com 的 Modbus 配置。")
+            QMessageBox.warning(self, "打开失败", "文件格式不是 DebugTool 的 Modbus 配置。")
             return
 
         self._set_modbus_config(payload.get("modbus", {}))
@@ -2159,7 +2268,7 @@ class SerialTool(QMainWindow):
             self,
             "保存 Modbus 配置",
             str(Path.home() / "modbus_profile.mbp"),
-            "QT5COM Profile (*.mbp);;JSON (*.json)",
+            "DebugTool Profile (*.mbp);;JSON (*.json)",
         )
         if not path:
             return
@@ -2185,6 +2294,7 @@ class SerialTool(QMainWindow):
         self.lbl_counter.setText(f"TX: {self.tx_bytes}  RX: {self.rx_bytes}")
 
     def _reset_counter(self):
+        self.network_panel.reset_counts()
         self.tx_bytes = self.rx_bytes = 0
         self._update_counter()
 
@@ -2284,6 +2394,8 @@ class SerialTool(QMainWindow):
     def _save_settings(self):
         s = self.settings
         self.ssh_panel.save_settings()
+        self.network_panel.save_settings()
+        self.settings.setValue("transport_mode", self.transport_mode.currentIndex())
         s.setValue("baud", self.cmb_baud.currentText())
         s.setValue("data", self.cmb_data.currentText())
         s.setValue("parity", self.cmb_parity.currentText())
@@ -2353,6 +2465,7 @@ class SerialTool(QMainWindow):
         try:
             self._save_settings()
         finally:
+            self.network_panel.stop()
             self.close_port()
         super().closeEvent(ev)
 
@@ -2360,18 +2473,18 @@ class SerialTool(QMainWindow):
 # ------------------------------------------------------------------ #
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("SerialDebugTool")
-    app.setApplicationDisplayName("Serial Debug Tool")
+    app.setApplicationName("DebugTool")
+    app.setApplicationDisplayName("DebugTool")
     app.setOrganizationName("RUIO")
     # GNOME Shell uses the desktop file ID to associate a running window with
     # its launcher and icon. The value must match qt5com.desktop without suffix.
     if hasattr(app, "setDesktopFileName"):
         app.setDesktopFileName("qt5com")
     theme_icon = QIcon.fromTheme("qt5com")
-    bundled_icon = os.path.join(app_dir(), "app.png")
+    bundled_icon = app_icon_path()
     app.setWindowIcon(
         QIcon(bundled_icon) if os.path.isfile(bundled_icon) else theme_icon)
-    w = SerialTool()
+    w = DebugTool()
     if os.environ.get("QT5COM_FULLSCREEN") == "1":
         # linuxfb has no window manager to correct saved desktop geometry.
         w.setGeometry(app.primaryScreen().geometry())

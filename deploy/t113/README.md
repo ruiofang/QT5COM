@@ -6,6 +6,8 @@
 ## 运行
 
 部署目录 `/mnt/UDISK/qt5com`，项目源码在 `app/`，独立依赖在 `runtime/`。
+启动入口为 `app/main.py`，工具名称为 DebugTool；服务名保持 `qt5com`。
+本目录的 `qt5com.service` 使用上述部署路径，与板端启动配置一致。
 此目录的 Python 和 Qt 不替换系统库。桌面端 x86_64 打包产物不能在 ARM 上运行。
 
 ```sh
